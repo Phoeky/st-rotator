@@ -8,9 +8,9 @@
 
 产物全部落在 ``release/``：
 
-- ``st-rotator-<版本>-win64.zip``   ← 发布用（两个 exe + 示例配置 + README + LICENSE）
+- ``st-rotator-<版本>-win64.zip``   ← 发布用（exe + 示例配置 + README + LICENSE）
 - ``st-rotator-<版本>-source.zip``  ← 源码包（供其它系统自行运行）
-- ``st-rotator.exe`` / ``st-rotator-tray.exe`` ← 单独留一份方便本地测试
+- ``st-rotator.exe`` ← 单 exe：双击即托盘，带参数即命令行工具（留一份方便本地测试）
 
 脚本自身不依赖 PyInstaller 之外的任何第三方包，也不假设 PATH 里有 ``pyinstaller``
 （用 ``sys.executable -m PyInstaller``，确保用的是当前解释器装的那份）。
@@ -19,8 +19,6 @@
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
 import sys
 import zipfile
@@ -58,17 +56,14 @@ def make_icon() -> Path:
     return target
 
 
-def write_version_info(version: str, variant: str) -> Path:
+def write_version_info(version: str) -> Path:
     """生成 PyInstaller 的 ``version_info.txt``。
 
     没有它，exe 右键「属性 → 详细信息」里版本号、产品名全是空白，用户和杀软都
     分不清这是什么程序。内容就是 VS_VERSIONINFO 结构的字面描述，PyInstaller
     会编译进 PE 资源段。
-
-    ``OriginalFilename`` 必须跟着 variant 走：两个 exe 同名会让人在任务管理器里
-    认错进程，也让「文件被替换」类告警对不上号。
     """
-    exe_name = "st-rotator-tray.exe" if variant == "tray" else "st-rotator.exe"
+    exe_name = "st-rotator.exe"
     parts = (version.split(".") + ["0", "0", "0"])[:4]
     nums = ", ".join(str(int(p)) for p in parts)
     text = f"""# UTF-8
@@ -98,9 +93,8 @@ VSVersionInfo(
     return target
 
 
-def run_pyinstaller(variant: str) -> None:
-    """按 variant 构建一个 exe。"""
-    env = dict(os.environ, ST_ROTATOR_VARIANT=variant)
+def run_pyinstaller() -> None:
+    """构建单 exe（``st-rotator.exe``，windowed）。"""
     cmd = [
         sys.executable, "-m", "PyInstaller",
         str(PACKAGING / "st-rotator.spec"),
@@ -108,20 +102,19 @@ def run_pyinstaller(variant: str) -> None:
         "--distpath", str(DIST),
         "--workpath", str(BUILD),
     ]
-    print(f"\n=== 构建 {variant} ===")
-    subprocess.run(cmd, check=True, cwd=str(ROOT), env=env)
+    print("\n=== 构建 st-rotator.exe ===")
+    subprocess.run(cmd, check=True, cwd=str(ROOT))
 
 
 def make_release_zip(version: str) -> Path:
-    """把两个 exe + 说明文件打成发布 zip。"""
+    """把单 exe + 说明文件打成发布 zip。"""
     RELEASE.mkdir(parents=True, exist_ok=True)
     target = RELEASE / f"st-rotator-{version}-win64.zip"
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        for exe in ("st-rotator.exe", "st-rotator-tray.exe"):
-            path = DIST / exe
-            if not path.is_file():
-                raise SystemExit(f"构建产物缺失: {path}")
-            zf.write(path, exe)
+        path = DIST / "st-rotator.exe"
+        if not path.is_file():
+            raise SystemExit(f"构建产物缺失: {path}")
+        zf.write(path, "st-rotator.exe")
         for name in EXTRA_FILES:
             path = ROOT / name
             if path.is_file():
@@ -175,9 +168,8 @@ def main() -> int:
         return 1
 
     make_icon()
-    for variant in ("cli", "tray"):
-        write_version_info(version, variant)
-        run_pyinstaller(variant)
+    write_version_info(version)
+    run_pyinstaller()
 
     payload = make_release_zip(version)
     source = make_source_zip(version)

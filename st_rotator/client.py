@@ -734,7 +734,12 @@ class StRotator:
             "error": str, "hidden": [被隐藏的模型名...]}``
         """
         with self._models_lock:
-            fresh = self._models_cache and (time.monotonic() - self._models_fetched_at) < ttl
+            # fresh 以「至少拉过一次」的时间戳判断，而不是 cache 真值：失败时 cache 恒为空
+            # （falsy），用真值会让每次轮询都重拉重记，零 Key/上游不可达时警告刷屏。
+            fresh = (
+                self._models_fetched_at > 0.0
+                and (time.monotonic() - self._models_fetched_at) < ttl
+            )
             if fresh and not refresh:
                 return self._models_result(cached=True)
             try:

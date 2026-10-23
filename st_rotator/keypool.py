@@ -287,7 +287,9 @@ class KeyPool:
                     )
                 )
         if not self._keys:
-            raise ConfigError("Key 池为空：请至少配置一个账号和一把 Key")
+            # 允许空池启动（零 Key 首启 UX）：请求会在 acquire 里拿到友好的
+            # NoAvailableKey("Key 池为空，请先添加至少一把 Key")，启动不拦。
+            pass
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._cursor = 0

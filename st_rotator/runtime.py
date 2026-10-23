@@ -16,9 +16,8 @@
 
 from __future__ import annotations
 
+import json
 import os
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -127,34 +126,36 @@ def template_path() -> Path:
 
 
 def ensure_config(path: str | os.PathLike[str] | None = None) -> tuple[Path, bool]:
-    """确保配置文件存在；不存在就从内置模板复制一份。
+    """确保配置文件存在；不存在就生成一份「零 Key」起步配置。
 
-    返回 ``(配置路径, 是否本次新建)``。模板也找不到时（例如源码目录被裁剪过）
-    只返回路径、不新建，让后面的 ``Config.from_file`` 去报「配置文件不存在」。
+    返回 ``(配置路径, 是否本次新建)``。
+
+    为什么不直接复制 ``config.example.json``
+    ----------------------------------------
+    模板里的 ``${SENSENOVA_KEY_1}`` 占位符对新用户只会导致启动即报
+    「环境变量未设置」，与「双击就能用」的目标冲突。所以首次运行生成的配置
+    以模板为底、但把 ``accounts`` 清空：程序带空 Key 池正常启动，
+    Key 由用户稍后在控制台里添加（空池请求会得到友好的「Key 池为空」提示）。
     """
     target = Path(path) if path is not None else default_config_path()
     if target.exists():
         return target, False
+    data: dict = {}
     template = template_path()
-    if not template.is_file():
-        return target, False
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(template, target)
-    return target, True
-
-
-def open_text_editor(path: str | os.PathLike[str]) -> bool:
-    """用系统默认程序打开一个文本文件（首次生成配置后方便用户直接填 Key）。"""
+    if template.is_file():
+        try:
+            loaded = json.loads(template.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    data["accounts"] = []
     try:
-        if sys.platform == "win32":
-            os.startfile(str(path))  # noqa: S606 - 路径来自本程序自己生成的配置文件
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(path)])
-        else:
-            subprocess.Popen(["xdg-open", str(path)])
-        return True
-    except Exception:  # pragma: no cover - 打不开就算了，不能因此阻断启动
-        return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return target, False
+    return target, True
 
 
 def _message_box(title: str, message: str, *, error: bool) -> None:

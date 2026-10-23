@@ -11,9 +11,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#)
-[![Release](https://img.shields.io/github/v/release/Phoeky/st-rotator.svg)](https://github.com/Phoeky/st-rotator/releases/latest)
+[![Release](https://img.shields.io/badge/release-v1.4.0-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v1.4.0)
 
-> 📦 **Windows 用户**：[下载 `st-rotator-1.3.0-win64.zip`](https://github.com/Phoeky/st-rotator/releases/latest) —— 解压即用，无需安装 Python。
+> 📦 **Windows 用户**：[下载 `st-rotator-1.4.0-win64.zip`](https://github.com/Phoeky/st-rotator/releases/download/v1.4.0/st-rotator-1.4.0-win64.zip) —— 单个 exe，双击即用，无需安装 Python、无需先配 Key。
 
 ![控制台](docs/console.png)
 
@@ -58,23 +58,25 @@
 
 ### Windows 免安装（推荐）
 
-从 [Releases](https://github.com/Phoeky/st-rotator/releases/latest) 下载 **`st-rotator-1.3.0-win64.zip`**，解压到**有写权限**的目录即可，**不需要安装 Python**：
+从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v1.4.0) 下载 **[`st-rotator-1.4.0-win64.zip`](https://github.com/Phoeky/st-rotator/releases/download/v1.4.0/st-rotator-1.4.0-win64.zip)**，解压到**有写权限**的目录即可，**不需要安装 Python**：
 
 | 文件 | 用途 |
 |---|---|
-| `st-rotator.exe` | 控制台版，跑所有 CLI 子命令（`serve` / `status` / `check` / `chat` / `bench` / `subkey` / `ui` / `tray` / `demo`） |
-| `st-rotator-tray.exe` | 无黑窗窗口版，双击即等于 `tray` 子命令（托盘 + 网关 + 控制台） |
+| `st-rotator.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具 |
 | `config.example.json` / `README.md` / `LICENSE` | 示例配置与文档 |
 
 > ⚠️ **不要解压到 `C:\Program Files`**：程序运行时会往 **exe 同目录**写 `config.json`、`rotator.log`、`subkeys.json`、`.tray-token`、`.tray-icons/`，放到无写权限的目录会失败。
 
-**首次运行**：双击 `st-rotator-tray.exe`。如果 exe 同目录没有 `config.json`，程序会用内置模板**自动生成**一份并弹窗告知，同时用记事本打开它。把自己的 API Key 填进 `accounts[*].api_keys` 后，重新双击即可。
+**首次运行（零配置）**：直接双击 `st-rotator.exe`。首次运行会自动在 exe 同目录生成一份 `config.json`（`accounts` 为空数组），网关与托盘照常启动，并**自动弹出控制台窗口**。在控制台的「添加 Key」里填入你的 API Key 即可开始使用 —— 无需手工编辑配置，也无需重启。
 
-模板里的 `${SENSENOVA_KEY_1}` 这类占位符**可以保留**，改成设置同名环境变量（`SENSENOVA_KEY_1=sk-...`）也一样生效。
+无 Key 时服务也能正常启动：状态接口秒回，只有真正发请求时才会返回「Key 池为空，请先添加至少一把 Key」。
 
 > 未签名的 exe 首次运行可能被 SmartScreen 拦住：点「**更多信息**」→「**仍要运行**」即可。这是 Windows 对未签名程序的通用提示，不是报错。
 
-托盘 exe 启动后：图标颜色表示健康度，**双击图标**打开控制台窗口，右键有菜单；控制台默认在 `http://127.0.0.1:8080/`。也支持命令行传参，例如 `st-rotator-tray.exe --port 8899`（等价于 `tray --port 8899`）。
+双击后：托盘图标颜色表示健康度，**双击图标**打开控制台，右键有菜单；控制台默认在 `http://127.0.0.1:8080/`。也支持命令行传参，例如 `st-rotator.exe --port 8899` 或 `st-rotator.exe --port=8989`（两者都等价于 `tray --port <端口>`）；加 `--no-open` 则只起服务、不自动弹控制台。
+
+> **全局单实例**：重复双击（或再次启动）不会起第二个网关，而是打开已有实例的控制台后退出（exit 0）。
+> 端口被占用时会弹窗提示，而不是静默失败。
 
 其他系统（Linux / macOS）**没有预编译包**（PyInstaller 不支持交叉编译），请按下面的源码方式运行，或在本机自行构建。
 
@@ -83,23 +85,24 @@
 ```bash
 git clone https://github.com/Phoeky/st-rotator.git
 cd st-rotator
-cp config.example.json config.json     # 填入你自己的 Key（config.json 已在 .gitignore 里）
 ```
 
 启动（三选一）：
 
 ```bash
-# 常驻系统托盘，不弹窗口 —— 推荐日常使用
-python -m st_rotator tray -c config.json --port 8899
+# 托盘 + 网关 + 自动打开控制台 —— 推荐日常使用
+python -m st_rotator tray --port 8899
 
 # 直接打开控制台窗口
-python -m st_rotator ui -c config.json --port 8899
+python -m st_rotator ui --port 8899
 
 # 只要网关，不要界面（适合部署到服务器）
-python -m st_rotator serve -c config.json --port 8080 --token <本地口令>
+python -m st_rotator serve --port 8080 --token <本地口令>
 ```
 
-`-c/--config` 现在**可以省略**：省略时默认用 `config.json`（源码运行 = 当前目录，exe 版 = exe 同目录）。
+与 exe 版一样是**零配置首启**：不写 `-c` 时默认用当前目录的 `config.json`，不存在会自动生成（`accounts` 为空），启动后在控制台「添加 Key」即可。
+
+`-c/--config` **可以省略**：省略时默认用 `config.json`（源码运行 = 当前目录，exe 版 = exe 同目录）。也可以先 `cp config.example.json config.json` 再手工编辑（`config.json` 已在 `.gitignore` 里）。
 
 Windows 用户可以直接生成桌面快捷方式，之后双击启动：
 
@@ -112,8 +115,12 @@ python install_shortcut.py --desktop
 ```bash
 python -m venv .venv && .venv\Scripts\activate    # Linux/macOS: source .venv/bin/activate
 pip install pyinstaller
-python packaging/build.py                          # 产物在 release/ 下
+python packaging/build.py                          # 产物：dist\st-rotator.exe + release\ 下的发布包
 ```
+
+构建脚本按 `packaging/st-rotator.spec` 打出**单个** windowed exe（入口 `packaging/entry.py`），
+并顺带生成 `st-rotator-<版本>-win64.zip`、`st-rotator-<版本>-source.zip` 与 `manifest.json`。
+PyInstaller 不支持交叉编译，Windows 的 exe 只能在 Windows 上构建。
 
 ## 接入上层应用
 
@@ -176,9 +183,11 @@ resp = client.chat.completions.create(
 
 ## 命令行
 
+exe 版和源码版共用同一套子命令：源码运行写 `python -m st_rotator <子命令>`，exe 直接写 `st-rotator.exe <子命令>`。
+
 | 命令 | 作用 |
 |---|---|
-| `tray [-c <cfg>] [--port P] [--token T]` | 系统托盘 + 网关 + 控制台（推荐日常使用） |
+| `tray [-c <cfg>] [--port P] [--token T] [--no-open]` | 系统托盘 + 网关 + 控制台（双击 exe 的默认行为） |
 | `ui [-c <cfg>] [--port P] [--token T] [--no-open]` | 图形控制台 + 网关 |
 | `serve [-c <cfg>] [--port P] [--token T]` | 只启动网关，无界面 |
 | `status [-c <cfg>]` | 打印 Key 池状态与限速模式 |
@@ -187,10 +196,15 @@ resp = client.chat.completions.create(
 | `bench [-c <cfg>] -n N -p P` | 并发压测，验证轮换效果 |
 | `subkey <action> [-c <cfg>]` | 管理对外子 Key（list / create / toggle / reset / revoke） |
 | `demo` | 离线演示，不需要真实 Key |
-| `--version` / `-V` | 打印版本号 |
+| `--version` / `-V` | 打印版本号（exe 版输出 `st-rotator 1.4.0`） |
 
 > `-c/--config` **可以省略**：省略时默认用 `config.json`（exe 版 = exe 同目录，源码运行 = 当前目录）。
 > exe 版可直接 `st-rotator.exe status`、`st-rotator.exe --version`。
+
+> ⚠️ **windowed exe 不会被 cmd / PowerShell 等待。** 在终端里交互使用没问题（入口用
+> `AttachConsole(-1)` 挂回父控制台，输出正常可见），但**脚本里要取退出码或捕获输出**时，
+> 请用 `Start-Process -Wait -RedirectStandardOutput out.txt st-rotator.exe -ArgumentList status`
+> （只要退出码可省 `-RedirectStandardOutput`），直接调用会立刻返回、拿不到结果。
 
 ## 配置
 
@@ -481,7 +495,7 @@ st_rotator/
 ├── cli.py          # 命令行
 └── demo.py         # 内置模拟上游
 
-packaging/          # 打包（PyInstaller spec、两个入口脚本、构建脚本 build.py）
+packaging/          # 打包（单 exe：build.py 构建脚本、entry.py 入口、st-rotator.spec、图标与版本资源）
 ```
 
 ## 环境要求
@@ -489,6 +503,13 @@ packaging/          # 打包（PyInstaller spec、两个入口脚本、构建脚
 - **exe 版无需 Python**：解压即用，见上文「Windows 免安装（推荐）」。
 - **源码运行需 Python 3.10+**（用到了 `X | Y` 类型语法）
 - 无任何第三方依赖，无需 `pip install`；仅自行构建 exe 时需要 `pyinstaller`
+
+## 历史版本
+
+- **v1.4.0（当前）**：合并为**单个** `st-rotator.exe`（windowed，约 9 MB），双击即托盘 + 控制台；
+  零配置首启（自动生成空 Key 的 `config.json`，Key 在控制台里添加）。
+- **v1.3.0**：旧的双 exe 形态 —— `st-rotator.exe`（控制台/CLI 版）+ `st-rotator-tray.exe`（无黑窗托盘版），
+  首启需手工编辑配置并填 Key。已不再发布，如需旧行为请用对应 tag 的源码自行构建。
 
 ## License
 

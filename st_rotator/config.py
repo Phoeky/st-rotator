@@ -291,8 +291,8 @@ class AccountConfig:
     def __post_init__(self) -> None:
         if not self.name:
             raise ConfigError("account.name 不能为空")
-        if not self.api_keys:
-            raise ConfigError(f"账号 {self.name} 未配置任何 api_keys")
+        # 允许空 api_keys：首次运行的零 Key 配置要能直接启动，
+        # 空池请求会在 KeyPool.acquire 抛出友好错误（"Key 池为空"）。
         if self.rpm_limit is not None and self.rpm_limit <= 0:
             raise ConfigError(f"账号 {self.name} 的 rpm_limit 必须 > 0 或留空")
         if self.max_concurrency <= 0:
@@ -362,8 +362,8 @@ class Config:
     # ---------------------------------------------------------------- 校验
 
     def __post_init__(self) -> None:
-        if not self.accounts:
-            raise ConfigError("配置中至少需要一个 account")
+        # 允许 accounts 为空：首次运行的零 Key 配置要能直接启动，
+        # 空池请求会在 KeyPool.acquire 抛出友好错误（"Key 池为空"）。
         if self.strategy not in STRATEGIES:
             raise ConfigError(f"strategy 必须是 {STRATEGIES} 之一，当前为 {self.strategy!r}")
         if self.max_attempts < 1:
@@ -387,9 +387,9 @@ class Config:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "Config":
         data = dict(data)
-        raw_accounts = data.pop("accounts", None)
-        if not raw_accounts:
+        if "accounts" not in data:
             raise ConfigError("配置缺少 accounts 字段")
+        raw_accounts = data.pop("accounts") or []  # 空列表合法：首次运行的零 Key 配置
         cooldown = CooldownConfig.from_dict(data.pop("cooldown", None))
         rate_control = RateControlConfig.from_dict(data.pop("rate_control", None))
         flash_lite = FlashLiteExchangeConfig.from_dict(data.pop("flash_lite_exchange", None))

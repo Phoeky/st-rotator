@@ -501,8 +501,8 @@ def _load_or_create_token(directory: Path) -> str:
 def cmd_tray(args: argparse.Namespace) -> int:
     """启动网关 + 控制台，并常驻系统托盘。
 
-    与 ``ui`` 的区别：**不弹浏览器窗口**，而是在托盘放一个图标；点它才打开控制台。
-    适合「开着就不管了」的日常使用方式。
+    启动成功后默认自动打开控制台窗口（``--no-open`` 可关），让用户「双击就能用」；
+    之后日常打开靠托盘图标。
     """
     from .proxy import create_server
     from .subkeys import SubKeyManager
@@ -543,6 +543,9 @@ def cmd_tray(args: argparse.Namespace) -> int:
         )
     except OSError as exc:
         sink(f"[错误] 无法监听 {args.host}:{args.port}：{exc}")
+        # 无控制台（双击 windowed exe）时 sink 的日志用户看不到，
+        # 必须弹窗告知，否则只会「双击了但什么都没发生」。
+        runtime.notify(f"无法监听 {args.host}:{args.port}：{exc}\n（可能已被其它程序占用）")
         rotator.close()
         return 1
 
@@ -570,6 +573,11 @@ def cmd_tray(args: argparse.Namespace) -> int:
         log=sink,
     )
     try:
+        if not args.no_open:
+            target = f"{url}#token={token}" if token else url
+            if not open_console_window(target, browser=args.browser, size=args.window_size)[0]:
+                sink(f"[警告] 自动打开控制台窗口失败，可手动访问：{url}")
+                open_in_default_browser(url)
         app.run()
     except KeyboardInterrupt:
         sink("[托盘] 收到中断信号")
@@ -683,7 +691,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tray = sub.add_parser(
         "tray",
-        help="启动网关并常驻系统托盘（不弹窗口，点托盘图标开控制台）",
+        help="启动网关、常驻系统托盘，并自动打开控制台（--no-open 可关）",
     )
     add_config(p_tray)
     p_tray.add_argument("--host", default="127.0.0.1", help="监听地址，默认只监听本机")
@@ -692,6 +700,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--token", default=None,
         help="本地鉴权 Token；不传则自动生成并复用配置目录下的 .tray-token",
     )
+    p_tray.add_argument("--no-open", action="store_true", help="只起服务，不自动打开控制台窗口")
     p_tray.add_argument("--browser", default=None, help="指定浏览器可执行文件（默认自动找 Edge/Chrome）")
     p_tray.add_argument("--window-size", default="1380,900", help="控制台窗口尺寸，形如 1380,900")
     p_tray.add_argument("--rate-mode", choices=RateControlConfig.MODES, default=None, help="覆盖限速模式")
@@ -772,32 +781,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _prepare_config_arg(args: argparse.Namespace) -> bool:
-    """把「没写 ``-c``」补成默认配置路径，首次运行时顺手生成一份模板。
+def _prepare_config_arg(args: argparse.Namespace) -> None:
+    """把「没写 ``-c``」补成默认配置路径，首次运行时生成零 Key 起步配置。
 
-    exe 版没有仓库里的 ``config.example.json`` 可参考，所以模板是**打进 exe 的**；
-    这里负责把它复制到可写目录并告诉用户「我刚给你建了一份，去填 Key」。
-
-    返回 ``True`` 表示「配置是刚生成的，本次应该直接退出」——模板里的 Key 是
-    ``${SENSENOVA_KEY_1}`` 占位符，未设环境变量时 ``expand_env`` 会抛 ConfigError。
-    继续往下跑只会得到一句「环境变量未定义」，不如就停在这里让用户先填 Key。
+    首启**不再退出、也不再弹记事本**：生成的配置 ``accounts`` 为空，程序可以带
+    空 Key 池直接启动（空池请求会得到友好的「Key 池为空」提示），Key 由用户稍后
+    在控制台里添加 —— ``tray`` 启动后会自动打开控制台。
 
     只对带 ``config`` 属性的子命令生效（``demo`` 不需要配置文件）。
     """
     if not hasattr(args, "config") or args.config:
-        return False
-    path, created = runtime.ensure_config()
+        return
+    path, _created = runtime.ensure_config()
     args.config = str(path)
-    if not created:
-        return False
-    runtime.notify(
-        f"首次运行，已生成配置文件：\n{path}\n\n"
-        "请把 API Key 填到 accounts[*].api_keys 里，保存后重新启动。",
-        title="st-rotator",
-        error=False,
-    )
-    runtime.open_text_editor(path)
-    return True
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -807,8 +803,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if _prepare_config_arg(args):
-            return 0
+        _prepare_config_arg(args)
         return int(args.func(args))
     except KeyboardInterrupt:
         print("\n已中断", file=sys.stderr)
