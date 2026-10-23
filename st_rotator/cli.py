@@ -22,10 +22,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Sequence
 
+from . import runtime
 from .client import StRotator
 from .config import Config, ConfigStore, RateControlConfig
 from .errors import ApiError, NoAvailableKey, RotationExhausted, RotatorError, StreamInterrupted
 from .keypool import mask_key
+from .version import __version__
 
 # ---------------------------------------------------------------- 输出工具
 
@@ -626,10 +628,23 @@ def build_parser() -> argparse.ArgumentParser:
         prog="st-rotator",
         description="多账户多 Key 轮换工具（限流自愈，面向 OpenAI 兼容端点）",
     )
+    parser.add_argument(
+        "-V", "--version", action="version", version=f"st-rotator {__version__}",
+        help="打印版本号并退出",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_config(p: argparse.ArgumentParser) -> None:
-        p.add_argument("-c", "--config", help="JSON 配置文件路径", required=True)
+        """挂上 ``-c/--config``。
+
+        省略时用 ``runtime.default_config_path()``（exe 版 = exe 同目录的
+        ``config.json``，源码运行 = 当前目录）。不再 ``required=True``：
+        exe 用户双击进来根本不会敲参数，强制必填只会让人以为程序坏了。
+        """
+        p.add_argument(
+            "-c", "--config", default=None,
+            help="JSON 配置文件路径；省略则用程序同目录下的 config.json",
+        )
 
     def add_logging(p: argparse.ArgumentParser, *, file_log_default_on: bool) -> None:
         """挂上日志参数。
@@ -757,19 +772,57 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _prepare_config_arg(args: argparse.Namespace) -> bool:
+    """把「没写 ``-c``」补成默认配置路径，首次运行时顺手生成一份模板。
+
+    exe 版没有仓库里的 ``config.example.json`` 可参考，所以模板是**打进 exe 的**；
+    这里负责把它复制到可写目录并告诉用户「我刚给你建了一份，去填 Key」。
+
+    返回 ``True`` 表示「配置是刚生成的，本次应该直接退出」——模板里的 Key 是
+    ``${SENSENOVA_KEY_1}`` 占位符，未设环境变量时 ``expand_env`` 会抛 ConfigError。
+    继续往下跑只会得到一句「环境变量未定义」，不如就停在这里让用户先填 Key。
+
+    只对带 ``config`` 属性的子命令生效（``demo`` 不需要配置文件）。
+    """
+    if not hasattr(args, "config") or args.config:
+        return False
+    path, created = runtime.ensure_config()
+    args.config = str(path)
+    if not created:
+        return False
+    runtime.notify(
+        f"首次运行，已生成配置文件：\n{path}\n\n"
+        "请把 API Key 填到 accounts[*].api_keys 里，保存后重新启动。",
+        title="st-rotator",
+        error=False,
+    )
+    runtime.open_text_editor(path)
+    return True
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    # 必须最先执行：windowed exe 里 sys.stdout/stderr 是 None，argparse 报错时
+    # 要往 stderr 写，晚一步就会变成「无效参数 + 崩溃」双重失败。
+    runtime.install_null_streams()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if _prepare_config_arg(args):
+            return 0
         return int(args.func(args))
     except KeyboardInterrupt:
         print("\n已中断", file=sys.stderr)
         return 130
     except RotatorError as exc:
-        print(f"错误: {exc}", file=sys.stderr)
+        # 没有控制台（windowed exe）时 print 等于石沉大海，必须改弹窗，
+        # 否则用户只会看到「双击了但什么都没发生」。
+        runtime.notify(str(exc))
         return 1
     except FileNotFoundError as exc:
-        print(f"错误: 找不到文件 {exc}", file=sys.stderr)
+        runtime.notify(f"找不到文件 {exc}")
+        return 1
+    except OSError as exc:
+        runtime.notify(f"系统错误：{exc}")
         return 1
 
 

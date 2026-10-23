@@ -30,3 +30,13 @@ python-path.txt
 .DS_Store
 Thumbs.db
 .workbuddy-ai/
+
+# 打包：构建虚拟环境、PyInstaller 中间产物、发布包
+.buildenv/
+build/
+dist/
+release/
+
+# 构建时生成的文件（图标和版本资源由 packaging/build.py 现场生成，不进仓库）
+packaging/st-rotator.ico
+packaging/version_info.txt

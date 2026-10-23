@@ -11,6 +11,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#)
+[![Release](https://img.shields.io/github/v/release/Phoeky/st-rotator.svg)](https://github.com/Phoeky/st-rotator/releases/latest)
+
+> 📦 **Windows 用户**：[下载 `st-rotator-1.3.0-win64.zip`](https://github.com/Phoeky/st-rotator/releases/latest) —— 解压即用，无需安装 Python。
 
 ![控制台](docs/console.png)
 
@@ -53,6 +56,30 @@
 
 ## 快速开始
 
+### Windows 免安装（推荐）
+
+从 [Releases](https://github.com/Phoeky/st-rotator/releases/latest) 下载 **`st-rotator-1.3.0-win64.zip`**，解压到**有写权限**的目录即可，**不需要安装 Python**：
+
+| 文件 | 用途 |
+|---|---|
+| `st-rotator.exe` | 控制台版，跑所有 CLI 子命令（`serve` / `status` / `check` / `chat` / `bench` / `subkey` / `ui` / `tray` / `demo`） |
+| `st-rotator-tray.exe` | 无黑窗窗口版，双击即等于 `tray` 子命令（托盘 + 网关 + 控制台） |
+| `config.example.json` / `README.md` / `LICENSE` | 示例配置与文档 |
+
+> ⚠️ **不要解压到 `C:\Program Files`**：程序运行时会往 **exe 同目录**写 `config.json`、`rotator.log`、`subkeys.json`、`.tray-token`、`.tray-icons/`，放到无写权限的目录会失败。
+
+**首次运行**：双击 `st-rotator-tray.exe`。如果 exe 同目录没有 `config.json`，程序会用内置模板**自动生成**一份并弹窗告知，同时用记事本打开它。把自己的 API Key 填进 `accounts[*].api_keys` 后，重新双击即可。
+
+模板里的 `${SENSENOVA_KEY_1}` 这类占位符**可以保留**，改成设置同名环境变量（`SENSENOVA_KEY_1=sk-...`）也一样生效。
+
+> 未签名的 exe 首次运行可能被 SmartScreen 拦住：点「**更多信息**」→「**仍要运行**」即可。这是 Windows 对未签名程序的通用提示，不是报错。
+
+托盘 exe 启动后：图标颜色表示健康度，**双击图标**打开控制台窗口，右键有菜单；控制台默认在 `http://127.0.0.1:8080/`。也支持命令行传参，例如 `st-rotator-tray.exe --port 8899`（等价于 `tray --port 8899`）。
+
+其他系统（Linux / macOS）**没有预编译包**（PyInstaller 不支持交叉编译），请按下面的源码方式运行，或在本机自行构建。
+
+### 从源码运行
+
 ```bash
 git clone https://github.com/Phoeky/st-rotator.git
 cd st-rotator
@@ -72,10 +99,20 @@ python -m st_rotator ui -c config.json --port 8899
 python -m st_rotator serve -c config.json --port 8080 --token <本地口令>
 ```
 
+`-c/--config` 现在**可以省略**：省略时默认用 `config.json`（源码运行 = 当前目录，exe 版 = exe 同目录）。
+
 Windows 用户可以直接生成桌面快捷方式，之后双击启动：
 
 ```bash
 python install_shortcut.py --desktop
+```
+
+### 从源码构建 exe
+
+```bash
+python -m venv .venv && .venv\Scripts\activate    # Linux/macOS: source .venv/bin/activate
+pip install pyinstaller
+python packaging/build.py                          # 产物在 release/ 下
 ```
 
 ## 接入上层应用
@@ -141,15 +178,19 @@ resp = client.chat.completions.create(
 
 | 命令 | 作用 |
 |---|---|
-| `tray -c <cfg> [--port P] [--token T]` | 系统托盘 + 网关 + 控制台（推荐日常使用） |
-| `ui -c <cfg> [--port P] [--token T] [--no-open]` | 图形控制台 + 网关 |
-| `serve -c <cfg> [--port P] [--token T]` | 只启动网关，无界面 |
-| `status -c <cfg>` | 打印 Key 池状态与限速模式 |
-| `check -c <cfg>` | 逐把 Key 单独体检（区分"真失效"和"暂时无法确认"） |
-| `chat -c <cfg> [-s] <prompt>` | 发一次对话，`-s` 流式 |
-| `bench -c <cfg> -n N -p P` | 并发压测，验证轮换效果 |
-| `subkey <action> -c <cfg>` | 管理对外子 Key（list / create / toggle / reset / revoke） |
+| `tray [-c <cfg>] [--port P] [--token T]` | 系统托盘 + 网关 + 控制台（推荐日常使用） |
+| `ui [-c <cfg>] [--port P] [--token T] [--no-open]` | 图形控制台 + 网关 |
+| `serve [-c <cfg>] [--port P] [--token T]` | 只启动网关，无界面 |
+| `status [-c <cfg>]` | 打印 Key 池状态与限速模式 |
+| `check [-c <cfg>]` | 逐把 Key 单独体检（区分"真失效"和"暂时无法确认"） |
+| `chat [-c <cfg>] [-s] <prompt>` | 发一次对话，`-s` 流式 |
+| `bench [-c <cfg>] -n N -p P` | 并发压测，验证轮换效果 |
+| `subkey <action> [-c <cfg>]` | 管理对外子 Key（list / create / toggle / reset / revoke） |
 | `demo` | 离线演示，不需要真实 Key |
+| `--version` / `-V` | 打印版本号 |
+
+> `-c/--config` **可以省略**：省略时默认用 `config.json`（exe 版 = exe 同目录，源码运行 = 当前目录）。
+> exe 版可直接 `st-rotator.exe status`、`st-rotator.exe --version`。
 
 ## 配置
 
@@ -435,15 +476,19 @@ st_rotator/
 ├── transport.py    # 零依赖 HTTP 客户端（连接池 + 流式读取）
 ├── limiter.py      # 固定限速 + AIMD 自适应限速
 ├── config.py       # 配置加载、校验、${ENV} 展开、定点落盘
+├── runtime.py      # 运行环境适配（源码运行 vs PyInstaller 打包：路径、默认配置、首启生成）
 ├── logs.py         # 日志环形缓冲 + 文件轮转
 ├── cli.py          # 命令行
 └── demo.py         # 内置模拟上游
+
+packaging/          # 打包（PyInstaller spec、两个入口脚本、构建脚本 build.py）
 ```
 
 ## 环境要求
 
-- Python **3.10+**（用到了 `X | Y` 类型语法）
-- 无任何第三方依赖，无需 `pip install`
+- **exe 版无需 Python**：解压即用，见上文「Windows 免安装（推荐）」。
+- **源码运行需 Python 3.10+**（用到了 `X | Y` 类型语法）
+- 无任何第三方依赖，无需 `pip install`；仅自行构建 exe 时需要 `pyinstaller`
 
 ## License
 
