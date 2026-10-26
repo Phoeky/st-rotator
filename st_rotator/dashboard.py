@@ -33,6 +33,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     --accent-soft: #eaf1ff;
     --green: #0f7a55;
     --green-bg: #e4f6ee;
+    --blue: #1f6feb;
+    --blue-bg: #e8f1fe;
     --amber: #8a5b00;
     --amber-bg: #fff3d4;
     --red: #b3261e;
@@ -52,6 +54,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       --accent-soft: #1e2b45;
       --green: #4fd1a5;
       --green-bg: #14302a;
+      --blue: #5b93ff;
+      --blue-bg: #16233f;
       --amber: #e8b84b;
       --amber-bg: #33290f;
       --red: #ff8078;
@@ -109,6 +113,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .kpi .value { font-size: 22px; font-weight: 640; margin-top: 3px; font-variant-numeric: tabular-nums; }
   .kpi .value small { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 3px; }
   .kpi .value.green { color: var(--green); }
+  .kpi .value.blue { color: var(--blue); }
   .kpi .value.amber { color: var(--amber); }
   .kpi .value.red { color: var(--red); }
 
@@ -129,6 +134,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     font-size: 11px; font-weight: 600; white-space: nowrap;
   }
   .pill.healthy { background: var(--green-bg); color: var(--green); }
+  .pill.inflight { background: var(--blue-bg); color: var(--blue); }
   .pill.cooldown { background: var(--amber-bg); color: var(--amber); }
   .pill.invalid { background: var(--red-bg); color: var(--red); }
   .pill.neutral { background: var(--accent-soft); color: var(--accent); }
@@ -352,8 +358,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
       <div class="row" style="margin-bottom:12px">
         <label class="field grow" style="margin-bottom:0">
-          <span>屏蔽模型（不出现在模型清单与选择器里，支持 * 通配，逗号分隔）</span>
-          <input id="opt-hidden" type="text" placeholder="如 deepseek-v4.1-flash, deepseek-v4.1-*">
+          <span>可用模型（留空 = 全部可用；列出后只有这些模型能被调用，支持 * 通配，逗号分隔）</span>
+          <input id="opt-available" type="text" placeholder="如 deepseek-v4.1-flash, deepseek-v4.1-*">
         </label>
       </div>
       <div class="row" style="margin-bottom:12px;align-items:flex-end;flex-wrap:wrap">
@@ -532,6 +538,7 @@ function renderKpis(state) {
   if (amp > 1.05) ampText += "（放大 " + amp.toFixed(2) + "×）";
   var cards = [
     ["可用 Key", fmtInt(s.healthy), "green", "共 " + fmtInt(s.total) + " 把"],
+    ["在途中", fmtInt(s.status_inflight != null ? s.status_inflight : s.inflight), (s.status_inflight || s.inflight) ? "blue" : "", "已占用、请求未返回"],
     ["冷却中", fmtInt(s.cooldown), s.cooldown ? "amber" : "", "等待恢复"],
     ["已失效", fmtInt(s.invalid), s.invalid ? "red" : "", "401/403 已隔离"],
     ["当前限速", rateText, rateClass, rateSub + " req/s"],
@@ -683,9 +690,13 @@ function renderModels(state) {
   } else if (!S.models.length) {
     count.textContent = "暂无清单，点「刷新清单」从上游拉取。";
   } else {
-    var hidden = catalog.hidden || [];
-    count.textContent = "共 " + S.models.length + " 个模型" + (catalog.cached ? "（缓存）" : "（刚拉取）")
-      + (hidden.length ? "，已按配置隐藏 " + hidden.length + " 个：" + hidden.join("、") : "");
+    var blocked = catalog.blocked || [];
+    var parts = ["共 " + S.models.length + " 个模型" + (catalog.cached ? "（缓存）" : "（刚拉取）")];
+    if (catalog.restricted) {
+      parts.push("已启用可用模型白名单，拦截 " + blocked.length + " 个不可用模型"
+        + (blocked.length ? "：" + blocked.join("、") : ""));
+    }
+    count.textContent = parts.join("，");
   }
   updateModelMeta();
 }
@@ -715,7 +726,7 @@ function renderPool(state) {
       "<th class='num'>成功/失败</th><th class='num'>429</th><th class='num'>延迟</th><th></th></tr>";
     var body = keys.map(function (k) {
       var st = k.stats || {};
-      var statusText = { healthy: "可用", cooldown: "冷却中", invalid: "已失效" }[k.status] || k.status;
+      var statusText = { healthy: "可用", inflight: "在途中", cooldown: "冷却中", invalid: "已失效" }[k.status] || k.status;
       var cooldown = k.cooldown_remaining > 0 ? k.cooldown_remaining + "s" : "—";
       return "<tr>" +
         "<td>" + esc(k.account) + "</td>" +
@@ -754,8 +765,8 @@ function renderOptions(state) {
   if (document.activeElement !== wait) wait.value = opt.max_total_wait;
   var attempts = $("opt-attempts");
   if (document.activeElement !== attempts) attempts.value = opt.max_attempts;
-  var hidden = $("opt-hidden");
-  if (document.activeElement !== hidden) hidden.value = (opt.hidden_models || []).join(", ");
+  var available = $("opt-available");
+  if (document.activeElement !== available) available.value = (opt.available_models || []).join(", ");
   var fx = opt.flash_lite || {};
   var fe = $("opt-fx-enabled");
   if (document.activeElement !== fe) fe.checked = !!fx.enabled;
@@ -874,7 +885,7 @@ async function onApplyModel() {
 }
 
 async function onApplyOptions() {
-  var hiddenModels = $("opt-hidden").value.split(/[\s,;]+/).map(function (s) { return s.trim(); })
+  var availableModels = $("opt-available").value.split(/[\s,;]+/).map(function (s) { return s.trim(); })
     .filter(function (s) { return s.length > 0; });
   var body = {
     strategy: $("opt-strategy").value,
@@ -882,7 +893,7 @@ async function onApplyOptions() {
     qps: parseFloat($("opt-qps").value),
     max_total_wait: parseFloat($("opt-wait").value),
     max_attempts: parseInt($("opt-attempts").value, 10),
-    hidden_models: hiddenModels,
+    available_models: availableModels,
     flash_lite: {
       enabled: $("opt-fx-enabled").checked,
       image_enabled: $("opt-fx-image").checked,

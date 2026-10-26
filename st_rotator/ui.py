@@ -233,7 +233,7 @@ class ConsoleState:
                 "max_qps": self.config.rate_control.max_qps,
                 "max_total_wait": self.config.max_total_wait,
                 "max_attempts": self.config.max_attempts,
-                "hidden_models": list(getattr(self.config, "model_filter", None).hidden)
+                "available_models": list(getattr(self.config, "model_filter", None).available)
                 if getattr(self.config, "model_filter", None) is not None
                 else [],
                 "strategies": list(STRATEGIES),
@@ -551,25 +551,25 @@ class ConsoleState:
                 self.store.set_scalar(field_name, converted)
             changes.append(f"{label}={converted}")
 
-        hidden_models = payload.get("hidden_models")
-        if hidden_models is not None:
-            if not isinstance(hidden_models, (list, tuple)):
-                return UiResponse.error("屏蔽模型必须是模型名数组，例如 [\"deepseek-v4.1-flash\"]")
+        available_models = payload.get("available_models")
+        if available_models is not None:
+            if not isinstance(available_models, (list, tuple)):
+                return UiResponse.error("可用模型必须是模型名数组，例如 [\"deepseek-v4.1-flash\"]")
             cleaned: list[str] = []
-            for item in hidden_models:
+            for item in available_models:
                 if not isinstance(item, str):
-                    return UiResponse.error(f"屏蔽模型只接受字符串，收到 {item!r}")
+                    return UiResponse.error(f"可用模型只接受字符串，收到 {item!r}")
                 name = item.strip()
                 if name and name not in cleaned:
                     cleaned.append(name)
             flt = getattr(self.config, "model_filter", None)
-            current = list(flt.hidden) if flt is not None else []
+            current = list(flt.available) if flt is not None else []
             if cleaned != current:
                 with self.lock:
                     self.rotator.set_model_filter(cleaned)
-                    self.store.set_section("model_filter", {"hidden": cleaned})
+                    self.store.set_section("model_filter", {"available": cleaned})
                     self.store.reload()
-                changes.append("屏蔽模型=" + ("无" if not cleaned else "、".join(cleaned)))
+                changes.append("可用模型=" + ("全部（不限）" if not cleaned else "、".join(cleaned)))
 
         fx_payload = payload.get("flash_lite")
         if fx_payload is not None:

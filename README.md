@@ -11,9 +11,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#)
-[![Release](https://img.shields.io/badge/release-v1.4.0-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v1.4.0)
+[![Release](https://img.shields.io/badge/release-v1.5.0-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v1.5.0)
 
-> 📦 **Windows 用户**：[下载 `st-rotator-1.4.0-win64.zip`](https://github.com/Phoeky/st-rotator/releases/download/v1.4.0/st-rotator-1.4.0-win64.zip) —— 单个 exe，双击即用，无需安装 Python、无需先配 Key。
+> 📦 **Windows 用户**：[下载 `st-rotator-1.5.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v1.5.0/st-rotator-1.5.0-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
 
 ![控制台](docs/console.png)
 
@@ -58,12 +58,11 @@
 
 ### Windows 免安装（推荐）
 
-从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v1.4.0) 下载 **[`st-rotator-1.4.0-win64.zip`](https://github.com/Phoeky/st-rotator/releases/download/v1.4.0/st-rotator-1.4.0-win64.zip)**，解压到**有写权限**的目录即可，**不需要安装 Python**：
+从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v1.5.0) 下载 **[`st-rotator-1.5.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v1.5.0/st-rotator-1.5.0-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
 
 | 文件 | 用途 |
 |---|---|
-| `st-rotator.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具 |
-| `config.example.json` / `README.md` / `LICENSE` | 示例配置与文档 |
+| `st-rotator-1.5.0-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
 
 > ⚠️ **不要解压到 `C:\Program Files`**：程序运行时会往 **exe 同目录**写 `config.json`、`rotator.log`、`subkeys.json`、`.tray-token`、`.tray-icons/`，放到无写权限的目录会失败。
 
@@ -119,7 +118,7 @@ python packaging/build.py                          # 产物：dist\st-rotator.ex
 ```
 
 构建脚本按 `packaging/st-rotator.spec` 打出**单个** windowed exe（入口 `packaging/entry.py`），
-并顺带生成 `st-rotator-<版本>-win64.zip`、`st-rotator-<版本>-source.zip` 与 `manifest.json`。
+并顺带生成 `st-rotator-<版本>-win64.exe`（**裸 exe 发布件，不打 zip**）、`st-rotator-<版本>-source.zip` 与 `manifest.json`。
 PyInstaller 不支持交叉编译，Windows 的 exe 只能在 Windows 上构建。
 
 ## 接入上层应用
@@ -237,9 +236,10 @@ exe 版和源码版共用同一套子命令：源码运行写 `python -m st_rota
     "server_error": 2
   },
 
-  // 模型清单过滤：把"几乎不可用"的模型从清单里藏掉，避免误选
+  // 可用模型白名单：留空 = 全部可用；列出后只有这些模型能被调用，
+  // 清单只列出它们，路由层对名单外的请求直接 400 拦截
   "model_filter": {
-    "hidden": ["deepseek-v4.1-flash", "some-vendor-*"]   // 精确名或 * 通配
+    "available": ["deepseek-v4.1-flash", "some-vendor-*"]   // 精确名或 * 通配
   },
 
   "accounts": [
@@ -275,9 +275,9 @@ exe 版和源码版共用同一套子命令：源码运行写 `python -m st_rota
 
 > ⚠️ 这是"本地池子不可用"时的快速失败，不影响正常限流路径。它把「全部 Key 都不可用」从上游故障（502）降级成可重试的限流（429），上层按 429 处理即可。
 
-**`model_filter.hidden` 把"几乎不可用"的模型从清单里藏掉。** 有些上游会在 `/v1/models` 里列出实际跑不通或极不稳定的模型（例如商汤的 `deepseek-v4.1-flash`），自己或上层 agent 一旦选中就会反复失败。配进 `hidden` 后，**控制台的选择器和网关透传的 `/v1/models` 都不会再列出它们**（两处保持一致，agent 自动挑模型时也不会踩坑）。支持精确名与 `*` 通配，例如 `"deepseek-v4.1-*"`；控制台模型清单下方会显示"已按配置隐藏 N 个"。**也可以在控制台「运行参数」卡片里直接改**（「屏蔽模型」输入框，逗号分隔，支持 `*` 通配），改动立即生效并落盘到 `config.json` 的 `model_filter.hidden`。
+**`model_filter.available` 是可用的模型白名单。** 有些上游会在 `/v1/models` 里列出实际跑不通或极不稳定的模型（例如商汤的 `deepseek-v4.1-flash`），自己或上层 agent 一旦选中就会反复失败。旧版 `model_filter.hidden` 只能把它们"藏"出清单（且不拦显式请求）；`available` 反过来用**白名单**：留空（默认）不限制；配进 `available` 后，**控制台选择器和网关透传的 `/v1/models` 只列出白名单内的模型**，同时**路由层对点名名单外模型的请求直接返回 400 拦截，不再转发给上游**——是真封锁，不是只藏不拦。支持精确名与 `*` 通配，例如 `"deepseek-v4.1-*"`；控制台模型清单下方会显示"已启用可用模型白名单，拦截 N 个不可用模型"。**也可以在控制台「运行参数」卡片里直接改**（「可用模型」输入框，逗号分隔，支持 `*` 通配），改动立即生效并落盘到 `config.json` 的 `model_filter.available`。
 
-> 只过滤**清单展示**，不拦截显式请求：上层若点名要这个模型，网关照常转发给上游（该报什么错就报什么错）。所以它是"防误选"，不是"封锁"。
+> 旧配置文件里的 `model_filter.hidden` 会被**忽略**（语义与白名单相反，无法安全转换），相当于不限制；请把想放行的模型改写进 `available`。请求未点名模型时按默认模型判断，默认模型不在白名单内同样会被 400 拦截。
 
 > ⚠️ **`cooldown.base` 是最容易调错、也最该调的一个参数 —— 它应该 ≈ 上游的限流恢复窗口。**
 > 填小了会让一把已经撞墙的 Key 在几秒后被反复重试，全是白打的请求，

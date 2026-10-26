@@ -2,8 +2,9 @@
 
 设计要点
 --------
-1. 每把 Key 独立维护状态：健康 / 冷却中 / 已失效，外加最近 60s 的请求时间窗，
-   用于本地 RPM 预限流（主动避开而不是被动挨打）。
+1. 每把 Key 独立维护状态：健康 / 在途中 / 冷却中 / 已失效，外加最近 60s 的请求
+   时间窗，用于本地 RPM 预限流（主动避开而不是被动挨打）。"在途中" 表示这把 Key
+   正被占用（有一或多个请求未返回），仍是健康可用的，只是暂时轮不到。
 2. ``acquire()`` 返回一把被"占用"的 Key，必须在 ``finally`` 里 ``release()``；
    所有等待都挂在 ``Condition`` 上，Key 一恢复可用立刻唤醒，不做无谓轮询。
 3. 429 走指数退避 + 抖动冷却；401/403 直接标记失效并从轮换集合中排除，避免在
@@ -30,7 +31,8 @@ from .errors import AllKeysInvalid, ConfigError, NoAvailableKey
 class KeyStatus(str, Enum):
     """Key 的可用性状态。"""
 
-    HEALTHY = "healthy"      # 可用
+    HEALTHY = "healthy"      # 可用（空闲）
+    INFLIGHT = "inflight"    # 在途中（已占用，请求未返回）
     COOLDOWN = "cooldown"    # 临时冷却（429 / 5xx）
     INVALID = "invalid"      # 凭据失效（401/403）
 
@@ -462,16 +464,20 @@ class KeyPool:
             self.release(key)
 
     def release(self, key: ApiKey) -> None:
-        """归还 Key（只减 inflight，不改变健康状态）。"""
+        """归还 Key：只减 inflight；若期间没有 report_* 改写状态，把"在途中"还原为可用。"""
         with self._cond:
             if key.inflight > 0:
                 key.inflight -= 1
+            if key.status is KeyStatus.INFLIGHT:
+                key.status = KeyStatus.HEALTHY
             if key.account_state is not None and key.account_state.inflight > 0:
                 key.account_state.inflight -= 1
             self._cond.notify_all()
 
     def _reserve(self, key: ApiKey, now: float) -> ApiKey:
         key.inflight += 1
+        if key.status is KeyStatus.HEALTHY:
+            key.status = KeyStatus.INFLIGHT  # 占用中 → "在途中"
         key.last_used = now
         key._window.append(now)
         key.stats.requests += 1
@@ -708,7 +714,10 @@ class KeyPool:
         with self._cond:
             self._refresh(now)
             total = len(self._keys)
-            healthy = sum(1 for k in self._keys if k.status is KeyStatus.HEALTHY)
+            # 在途 Key 仍是健康的：只是正被占用，健康度统计要算进去，
+            # 否则高并发时段 healthy 会短暂归零（托盘/CLI 会误报"无 Key 可用"）。
+            healthy = sum(1 for k in self._keys if k.status in (KeyStatus.HEALTHY, KeyStatus.INFLIGHT))
+            inflight = sum(1 for k in self._keys if k.status is KeyStatus.INFLIGHT)
             cooling = sum(1 for k in self._keys if k.status is KeyStatus.COOLDOWN)
             invalid = sum(1 for k in self._keys if k.status is KeyStatus.INVALID)
             return {
@@ -717,4 +726,5 @@ class KeyPool:
                 "cooldown": cooling,
                 "invalid": invalid,
                 "inflight": sum(k.inflight for k in self._keys),
+                "status_inflight": inflight,
             }

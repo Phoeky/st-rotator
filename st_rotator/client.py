@@ -665,36 +665,58 @@ class StRotator:
         return self.limiter.stats()
 
     def model_filter(self) -> Any:
-        """当前的模型清单过滤器（``config.model_filter``；老配置对象可能没有该字段）。"""
+        """当前的模型可用过滤器（``config.model_filter``；老配置对象可能没有该字段）。"""
         return getattr(self.config, "model_filter", None)
 
-    def hidden_model(self, model_id: str) -> bool:
-        """该模型是否被配置为"从清单里藏掉"。"""
+    def is_model_allowed(self, model_id: str) -> bool:
+        """模型是否允许使用：白名单为空 → 全部放行（可用模型过滤）。"""
         flt = self.model_filter()
-        return bool(flt is not None and flt.is_hidden(model_id))
+        return flt is None or flt.is_available(model_id)
 
-    def set_model_filter(self, hidden: Sequence[str]) -> None:
-        """更新模型屏蔽清单（控制台「屏蔽模型」配置）。
+    def model_block_reason(self, model_id: str | None) -> str | None:
+        """供路由层拦截：模型不在可用白名单时返回拒绝原因，放行返回 ``None``。
 
-        只影响 ``/v1/models`` 与控制台模型选择器的清单展示，不拦截显式请求；
+        ``available`` 白名单是**真拦截**：点名未列出模型（或未点名但默认模型
+        不在白名单内）的请求，网关照旧版 hidden 时代那样转发给上游了——
+        这里直接给出可读的拒绝文案，由网关返回 400。
+        """
+        flt = self.model_filter()
+        if flt is None or not flt.available:
+            return None
+        effective = (model_id or "").strip() or self.config.default_model
+        if not effective:
+            return "未指定模型，且未配置默认模型"
+        if flt.is_available(effective):
+            return None
+        allowed = "、".join(flt.available)
+        return (
+            f"模型 {effective!r} 不在可用模型白名单内（仅允许：{allowed}）。"
+            "请在控制台「运行参数」配置可用模型，或改用白名单内的模型。"
+        )
+
+    def set_model_filter(self, available: Sequence[str]) -> None:
+        """更新可用模型白名单（控制台「可用模型」配置）。
+
+        空白名单 = 全部模型可用。配置后不仅 ``/v1/models`` 与控制台模型选择器
+        只列出白名单内的模型，路由层也会真实拦截名单外模型的请求（400）；
         老配置对象（无 ``model_filter`` 字段）直接补一个过滤对象挂上去。
         """
         cleaned: list[str] = []
-        for name in hidden:
+        for name in available:
             name = (name or "").strip()
             if name and name not in cleaned:
                 cleaned.append(name)
         flt = self.model_filter()
         if flt is None:
-            self.config.model_filter = ModelFilterConfig(hidden=cleaned)
+            self.config.model_filter = ModelFilterConfig(available=cleaned)
         else:
-            flt.hidden = cleaned
+            flt.available = cleaned
 
     def filter_models_payload(self, payload: Any) -> Any:
         """过滤 OpenAI 风格 ``{"data": [...]}`` 模型清单，其余字段原样保留。
 
         用于网关把 ``/v1/models`` 透传给上层应用时保持与控制台一致——
-        被隐藏的模型不该出现在任何一份清单里。
+        白名单外的模型不该出现在任何一份清单里。
         """
         if not isinstance(payload, dict):
             return payload
@@ -710,7 +732,7 @@ class StRotator:
             else:
                 kept.append(item)
                 continue
-            if self.hidden_model(str(model_id or "")):
+            if not self.is_model_allowed(str(model_id or "")):
                 continue
             kept.append(item)
         if len(kept) == len(data):
@@ -731,7 +753,7 @@ class StRotator:
 
         Returns:
             ``{"models": [...], "fetched_at": 时间戳, "cached": bool,
-            "error": str, "hidden": [被隐藏的模型名...]}``
+            "error": str, "restricted": bool, "blocked": [被白名单拦截的模型名...]}``
         """
         with self._models_lock:
             # fresh 以「至少拉过一次」的时间戳判断，而不是 cache 真值：失败时 cache 恒为空
@@ -757,20 +779,26 @@ class StRotator:
             return self._models_result(cached=False)
 
     def _models_result(self, *, cached: bool) -> dict[str, Any]:
-        """把缓存里的模型清单按配置过滤后打包返回（调用方需持 ``_models_lock``）。"""
+        """把缓存里的模型清单按可用白名单过滤后打包返回（调用方需持 ``_models_lock``）。
+
+        ``restricted`` 表示白名单是否生效（非空），``blocked`` 是名单外被拦截的模型名。
+        """
+        flt = self.model_filter()
+        restricted = bool(flt is not None and flt.available)
         kept: list[dict[str, Any]] = []
-        hidden: list[str] = []
+        blocked: list[str] = []
         for model in self._models_cache:
-            if self.hidden_model(model.get("id", "")):
-                hidden.append(str(model.get("id", "")))
-            else:
+            if self.is_model_allowed(model.get("id", "")):
                 kept.append(model)
+            else:
+                blocked.append(str(model.get("id", "")))
         return {
             "models": kept,
             "fetched_at": self._models_fetched_at,
             "cached": cached,
             "error": self._models_error,
-            "hidden": hidden,
+            "restricted": restricted,
+            "blocked": blocked,
         }
 
     # ------------------------------------------------------------ 内部：载荷

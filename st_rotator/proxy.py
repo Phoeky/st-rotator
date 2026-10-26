@@ -467,6 +467,14 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             self._send_json(400, error_payload("'messages' is required", "invalid_request_error"))
             return
 
+        # 路由层真实拦截：模型不在可用白名单里就直接 400，不转发给上游
+        # （model_block_reason 内部会回落到默认模型再判断）。
+        blocked = self.rotator.model_block_reason(model)
+        if blocked is not None:
+            self._send_json(400, error_payload(blocked, "invalid_request_error", "model_not_available"))
+            self._record_subkey_usage(ok=False, model=model, stream=stream)
+            return
+
         if self.console is not None:
             self.console.metrics.note_request(stream=stream)
 
@@ -608,6 +616,14 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
                 self._send_json(400, error_payload(f"invalid JSON body: {exc}", "invalid_request_error"))
                 return
         headers = self._forwardable_headers()
+        # 路由层真实拦截：透传端点只要显式点名了模型，就按可用白名单拦一遍，
+        # 名单外的模型直接 400，不消耗上游额度（见 model_filter.available 配置）。
+        if record_usage and isinstance(body, dict) and body.get("model") is not None:
+            reason = self.rotator.model_block_reason(str(body.get("model")))
+            if reason is not None:
+                self._send_json(400, error_payload(reason, "invalid_request_error", "model_not_available"))
+                self._record_subkey_usage(ok=False, model=str(body.get("model")))
+                return
         try:
             result = self.rotator.request(upstream_path, method=method, json_body=body, headers=headers)
         except ApiError as exc:
@@ -636,8 +652,8 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             if record_usage:
                 self._record_subkey_usage(ok=False, latency_ms=_elapsed_ms(started))
             return
-        # 模型清单按配置过滤：上层应用看到的清单与控制台保持一致，
-        # 避免 agent 自动挑中那些"几乎不可用"的模型（见 model_filter 配置）。
+        # 模型清单按可用白名单过滤：上层应用看到的清单与控制台保持一致，
+        # 名单外的模型不列出（路由层点名它们还会被 400 拦下，见 model_filter.available）。
         if method == "GET" and upstream_path.split("?", 1)[0].rstrip("/") == "models":
             result = self.rotator.filter_models_payload(result)
         if record_usage:

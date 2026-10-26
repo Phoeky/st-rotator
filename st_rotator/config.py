@@ -224,20 +224,24 @@ class FlashLiteExchangeConfig:
 
 @dataclass
 class ModelFilterConfig:
-    """模型清单过滤：把"几乎不可用"的模型从清单里藏掉。
+    """模型可用过滤（白名单）：只允许列出的模型被使用。
 
     有些上游会在 ``/v1/models`` 里列出实际几乎跑不通的模型（实测商汤的
-    ``deepseek-v4.1-flash`` 就经常不可用）。把它们配进 ``hidden`` 后，
-    **控制台的选择器和网关透传的 ``/v1/models`` 都不会再列出它们**，
-    省得自己或上层 agent 误选。
+    ``deepseek-v4.1-flash`` 就经常不可用）。旧版用 ``hidden`` 把它们"藏掉"，
+    但只影响清单展示、不拦显式请求；现在改成 ``available`` **白名单**：
+
+    - 搭配进 ``available`` 后，**控制台选择器、网关透传的 ``/v1/models`` 只列出它们**；
+    - 路由层对点名未列出模型（或未点名但默认模型不在白名单）的请求
+      **直接返回 400 拒绝**，不再转发给上游——是真拦截，不是只藏不拦。
+
+    留空（默认）表示不限制，所有模型可用。
 
     Attributes:
-        hidden: 要隐藏的模型名列表，支持 ``*`` 通配（如 ``deepseek-v4.1-*``）。
-            只影响"清单展示"，**不拦截显式请求**——上层点名要这个模型时，
-            网关照常转发给上游（该报什么错就报什么错），不做额外限制。
+        available: 可用模型名列表，空列表 = 全部可用；支持 ``*`` 通配
+            （如 ``deepseek-v4.1-*``）。
     """
 
-    hidden: list[str] = field(default_factory=list)
+    available: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> "ModelFilterConfig":
@@ -245,29 +249,37 @@ class ModelFilterConfig:
             return cls()
         if not isinstance(data, Mapping):
             raise ConfigError("model_filter 必须是对象")
-        unknown = set(data) - set(cls.__dataclass_fields__)
+        unknown = set(data) - set(cls.__dataclass_fields__) - {"hidden"}
         if unknown:
             raise ConfigError(f"model_filter 存在未知字段: {sorted(unknown)}")
-        raw = data.get("hidden") or []
+        if "hidden" in data and "available" not in data:
+            # 兼容旧版 model_filter.hidden：语义与 available 相反（黑名单 vs 白名单），
+            # 无法安全转换，直接忽略并当作"不限制"，避免旧配置一启动就 400。
+            raw: Any = []
+        else:
+            raw = data.get("available") or []
+        key = "available"
         if isinstance(raw, str):
-            raise ConfigError("model_filter.hidden 必须是数组，例如 [\"deepseek-v4.1-flash\"]")
+            raise ConfigError(f"model_filter.{key} 必须是数组，例如 [\"deepseek-v4.1-flash\"]")
         if not isinstance(raw, (list, tuple)):
-            raise ConfigError("model_filter.hidden 必须是数组")
-        hidden: list[str] = []
+            raise ConfigError(f"model_filter.{key} 必须是数组")
+        available: list[str] = []
         for item in raw:
             if not isinstance(item, str):
-                raise ConfigError(f"model_filter.hidden 只接受字符串，收到 {item!r}")
+                raise ConfigError(f"model_filter.{key} 只接受字符串，收到 {item!r}")
             name = item.strip()
-            if name and name not in hidden:  # 去重但保持书写顺序
-                hidden.append(name)
-        return cls(hidden=hidden)
+            if name and name not in available:  # 去重但保持书写顺序
+                available.append(name)
+        return cls(available=available)
 
-    def is_hidden(self, model_id: str) -> bool:
-        """模型是否命中隐藏规则（精确匹配或 ``*`` 通配）。"""
+    def is_available(self, model_id: str) -> bool:
+        """模型是否可用：白名单为空 → 全部放行；否则必须精确匹配或命中 ``*`` 通配。"""
         name = (model_id or "").strip()
+        if not self.available:
+            return True
         if not name:
             return False
-        return any(fnmatch.fnmatchcase(name, pattern) for pattern in self.hidden)
+        return any(fnmatch.fnmatchcase(name, pattern) for pattern in self.available)
 
 
 @dataclass

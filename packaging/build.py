@@ -8,7 +8,7 @@
 
 产物全部落在 ``release/``：
 
-- ``st-rotator-<版本>-win64.zip``   ← 发布用（exe + 示例配置 + README + LICENSE）
+- ``st-rotator-<版本>-win64.exe`` ← 发布用（**裸 exe，不打 zip**，直接下载运行）
 - ``st-rotator-<版本>-source.zip``  ← 源码包（供其它系统自行运行）
 - ``st-rotator.exe`` ← 单 exe：双击即托盘，带参数即命令行工具（留一份方便本地测试）
 
@@ -29,9 +29,6 @@ PACKAGING = ROOT / "packaging"
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 RELEASE = ROOT / "release"
-
-#: 打包成 zip 时放进根目录的文件（exe 除外，单独加）
-EXTRA_FILES = ["config.example.json", "README.md", "LICENSE"]
 
 
 def read_version() -> str:
@@ -106,19 +103,19 @@ def run_pyinstaller() -> None:
     subprocess.run(cmd, check=True, cwd=str(ROOT))
 
 
-def make_release_zip(version: str) -> Path:
-    """把单 exe + 说明文件打成发布 zip。"""
+def make_release_exe(version: str) -> Path:
+    """把构建好的单 exe 复制成带版本号的裸 exe 发布件（不打 zip）。
+
+    旧版是把 exe 塞进 ``st-rotator-<版本>-win64.zip`` 再发布，用户要多一步解压；
+    现在直接发布裸 exe，下载完双击就能运行。示例配置/README/LICENSE 不再进包，
+    需要的用户去仓库拿即可。
+    """
     RELEASE.mkdir(parents=True, exist_ok=True)
-    target = RELEASE / f"st-rotator-{version}-win64.zip"
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
-        path = DIST / "st-rotator.exe"
-        if not path.is_file():
-            raise SystemExit(f"构建产物缺失: {path}")
-        zf.write(path, "st-rotator.exe")
-        for name in EXTRA_FILES:
-            path = ROOT / name
-            if path.is_file():
-                zf.write(path, name)
+    target = RELEASE / f"st-rotator-{version}-win64.exe"
+    path = DIST / "st-rotator.exe"
+    if not path.is_file():
+        raise SystemExit(f"构建产物缺失: {path}")
+    target.write_bytes(path.read_bytes())
     return target
 
 
@@ -171,7 +168,7 @@ def main() -> int:
     write_version_info(version)
     run_pyinstaller()
 
-    payload = make_release_zip(version)
+    payload = make_release_exe(version)
     source = make_source_zip(version)
     for item in (payload, source):
         print(f"  {item}  ({item.stat().st_size / 1024 / 1024:.1f} MB)")
