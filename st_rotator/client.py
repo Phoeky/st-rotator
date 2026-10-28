@@ -565,7 +565,7 @@ class StRotator:
         *,
         account: str | None = None,
         rpm_limit: int | None = None,
-        max_concurrency: int = 4,
+        max_concurrency: int = 16,
         weight: float = 1.0,
     ) -> ApiKey:
         """运行中加一把 Key，立刻参与轮换。"""

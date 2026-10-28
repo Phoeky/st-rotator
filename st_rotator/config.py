@@ -291,12 +291,15 @@ class AccountConfig:
     连环送死。所以这里填的是**账号总配额**，不要再除以 Key 数量——除以 Key 数量是
     旧的"每把 Key 各自一个窗口"语义，会让闸门被收窄 N 倍。留空表示不做本地 RPM 限制，
     完全依赖上游 429 反馈。
+
+    ``max_concurrency`` 是**每把 Key** 的并发上限（默认 16）：同一把 Key 同时最多
+    放行多少个在途请求，超出部分在池里排队等释放。
     """
 
     name: str
     api_keys: list[str] = field(default_factory=list)
     rpm_limit: int | None = None
-    max_concurrency: int = 4
+    max_concurrency: int = 16
     weight: float = 1.0
     tags: list[str] = field(default_factory=list)
 
@@ -362,12 +365,12 @@ class Config:
     # 智能一换一（套餐耗尽时烧推广池换通用池）
     flash_lite_exchange: FlashLiteExchangeConfig = field(default_factory=FlashLiteExchangeConfig)
 
-    # 模型清单过滤（把几乎不可用的模型从清单里藏掉）
+    # 可用模型白名单（空 = 全部可用；非空时只有清单里的模型能被调用，路由层真实拦截）
     model_filter: ModelFilterConfig = field(default_factory=ModelFilterConfig)
 
     # 连接池
-    max_connections: int = 100
-    max_keepalive: int = 20
+    max_connections: int = 512
+    max_keepalive: int = 64
 
     extra_headers: dict[str, str] = field(default_factory=dict)
 
@@ -551,7 +554,7 @@ class ConfigStore:
         account: str | None = None,
         *,
         rpm_limit: int | None = None,
-        max_concurrency: int = 4,
+        max_concurrency: int = 16,
         weight: float = 1.0,
     ) -> dict[str, Any]:
         """把一把 Key 写进配置文件；同名账号则追加，否则新建账号。"""

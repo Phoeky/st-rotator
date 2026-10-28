@@ -256,6 +256,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="row">
         <button class="primary grow" id="btn-apply-model">应用为默认模型</button>
       </div>
+      <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
+        <label class="field">
+          <span>可用模型（留空 = 全部可用；选择后只有这些模型能被调用，网关会真实拦截清单外的请求）</span>
+          <select id="opt-available" multiple size="6" style="font-family:var(--mono);height:auto"></select>
+        </label>
+        <div class="row" style="justify-content:flex-end;margin:6px 0 10px">
+          <button class="tiny" id="btn-avail-all">全选</button>
+          <button class="tiny" id="btn-avail-none" style="margin-left:6px">清空</button>
+        </div>
+        <div class="row">
+          <button class="primary grow" id="btn-apply-available">应用可用模型</button>
+        </div>
+        <div class="muted" style="font-size:11.5px;margin-top:8px">
+          模型名以「刷新清单」拉到的最新上游清单为准；未选中的模型不会被列入清单、点名调用返回 400。
+        </div>
+      </div>
       <div class="muted" style="font-size:11.5px;margin-top:11px;line-height:1.6">
         网关对上层完全透明：客户端请求里带 <code>model</code> 就用它的，
         没带则回落到这里的默认值。
@@ -280,7 +296,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </label>
         <label class="field" style="width:104px;margin-bottom:0">
           <span>并发上限</span>
-          <input id="new-concurrency" type="number" min="1" max="64" value="4">
+          <input id="new-concurrency" type="number" min="1" max="256" value="16">
         </label>
         <button class="primary" id="btn-add" style="height:33px">添加</button>
       </div>
@@ -355,12 +371,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <input id="opt-attempts" type="number" min="1" max="50">
         </label>
         <button class="primary" id="btn-apply-options" style="height:33px">应用</button>
-      </div>
-      <div class="row" style="margin-bottom:12px">
-        <label class="field grow" style="margin-bottom:0">
-          <span>可用模型（留空 = 全部可用；列出后只有这些模型能被调用，支持 * 通配，逗号分隔）</span>
-          <input id="opt-available" type="text" placeholder="如 deepseek-v4.1-flash, deepseek-v4.1-*">
-        </label>
       </div>
       <div class="row" style="margin-bottom:12px;align-items:flex-end;flex-wrap:wrap">
         <label class="field" style="width:auto;margin-bottom:0;flex-direction:row;align-items:center;gap:6px">
@@ -682,6 +692,18 @@ function renderModels(state) {
   }).join("") || '<option value="">（无可用模型）</option>';
   select.dataset.current = current || "";
 
+  // 可用模型：多选，随模型清单一起绘制。以已保存的白名单为准
+  //（含不在最新清单里的历史项，方便取消勾选）；用户正在操作时不清空其选择。
+  var av = $("opt-available");
+  if (document.activeElement !== av) {
+    var saved = state.available_models || [];
+    var availIds = S.models.map(function (m) { return m.id; });
+    saved.forEach(function (id) { if (availIds.indexOf(id) === -1) availIds.push(id); });
+    av.innerHTML = availIds.map(function (id) {
+      return '<option value="' + esc(id) + '"' + (saved.indexOf(id) !== -1 ? " selected" : "") + '>' + esc(id) + '</option>';
+    }).join("");
+  }
+
   // 注意：详情写在 #model-meta，条数写在 #model-count。两者必须分开——
   // 早先共用一个元素时，"共 N 个模型"会把模型详情覆盖掉，详情永远看不见。
   var count = $("model-count");
@@ -765,8 +787,6 @@ function renderOptions(state) {
   if (document.activeElement !== wait) wait.value = opt.max_total_wait;
   var attempts = $("opt-attempts");
   if (document.activeElement !== attempts) attempts.value = opt.max_attempts;
-  var available = $("opt-available");
-  if (document.activeElement !== available) available.value = (opt.available_models || []).join(", ");
   var fx = opt.flash_lite || {};
   var fe = $("opt-fx-enabled");
   if (document.activeElement !== fe) fe.checked = !!fx.enabled;
@@ -855,7 +875,7 @@ async function onAddKeys() {
       body: JSON.stringify({
         keys: raw,
         account: $("new-account").value.trim(),
-        max_concurrency: parseInt($("new-concurrency").value, 10) || 4
+        max_concurrency: parseInt($("new-concurrency").value, 10) || 16
       })
     });
     var msg = "已添加 " + result.added.length + " 把 Key";
@@ -884,16 +904,27 @@ async function onApplyModel() {
   } catch (err) { toast(err.message, "err"); }
 }
 
+async function onApplyAvailable() {
+  var av = $("opt-available");
+  var models = [];
+  Array.prototype.forEach.call(av.options, function (o) { if (o.selected) models.push(o.value); });
+  try {
+    var result = await api("/api/model/available", {
+      method: "POST",
+      body: JSON.stringify({ models: models })
+    });
+    toast(result.message, "ok");
+    await refreshState();
+  } catch (err) { toast(err.message, "err"); }
+}
+
 async function onApplyOptions() {
-  var availableModels = $("opt-available").value.split(/[\s,;]+/).map(function (s) { return s.trim(); })
-    .filter(function (s) { return s.length > 0; });
   var body = {
     strategy: $("opt-strategy").value,
     rate_mode: $("opt-rate-mode").value,
     qps: parseFloat($("opt-qps").value),
     max_total_wait: parseFloat($("opt-wait").value),
     max_attempts: parseInt($("opt-attempts").value, 10),
-    available_models: availableModels,
     flash_lite: {
       enabled: $("opt-fx-enabled").checked,
       image_enabled: $("opt-fx-image").checked,
@@ -1202,6 +1233,13 @@ function bind() {
   $("btn-sk-create").onclick = onSubkeyCreate;
   $("sk-name").addEventListener("keydown", function (event) { if (event.key === "Enter") onSubkeyCreate(); });
   $("btn-apply-model").onclick = onApplyModel;
+  $("btn-apply-available").onclick = onApplyAvailable;
+  $("btn-avail-all").onclick = function () {
+    Array.prototype.forEach.call($("opt-available").options, function (o) { o.selected = true; });
+  };
+  $("btn-avail-none").onclick = function () {
+    Array.prototype.forEach.call($("opt-available").options, function (o) { o.selected = false; });
+  };
   $("btn-apply-options").onclick = onApplyOptions;
   $("btn-models").onclick = async function () {
     try { await api("/api/models/refresh", { method: "POST" }); await refreshState(); toast("模型清单已刷新", "ok"); }

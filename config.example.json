@@ -56,21 +56,21 @@
       "name": "账号1",
       "api_keys": ["${SENSENOVA_KEY_1}"],
       "rpm_limit": 2,
-      "max_concurrency": 4,
+      "max_concurrency": 16,
       "weight": 1
     },
     {
       "name": "账号2",
       "api_keys": ["${SENSENOVA_KEY_2}"],
       "rpm_limit": 2,
-      "max_concurrency": 4,
+      "max_concurrency": 16,
       "weight": 1
     },
     {
       "name": "账号3",
       "api_keys": ["${SENSENOVA_KEY_3}"],
       "rpm_limit": 2,
-      "max_concurrency": 4,
+      "max_concurrency": 16,
       "weight": 1
     }
   ]

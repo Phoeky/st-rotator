@@ -223,6 +223,11 @@ class ConsoleState:
             "metrics": metrics,
             "models": self.rotator.available_models(),
             "default_model": self.config.default_model,
+            "available_models": (
+                list(getattr(self.config, "model_filter", None).available)
+                if getattr(self.config, "model_filter", None) is not None
+                else []
+            ),
             "log_file": self.log_file,
             "subkeys": self._subkeys_snapshot(),
             "options": {
@@ -233,9 +238,6 @@ class ConsoleState:
                 "max_qps": self.config.rate_control.max_qps,
                 "max_total_wait": self.config.max_total_wait,
                 "max_attempts": self.config.max_attempts,
-                "available_models": list(getattr(self.config, "model_filter", None).available)
-                if getattr(self.config, "model_filter", None) is not None
-                else [],
                 "strategies": list(STRATEGIES),
                 "rate_modes": list(RateControlConfig.MODES),
                 "flash_lite": {
@@ -366,7 +368,7 @@ class ConsoleState:
         raw: str,
         *,
         account: str | None = None,
-        max_concurrency: int = 4,
+        max_concurrency: int = 16,
         rpm_limit: int | None = None,
         verify: bool = True,
     ) -> UiResponse:
@@ -490,6 +492,35 @@ class ConsoleState:
         self._save_and_log(f"默认模型切换为 {model}")
         note = "" if not known or model in known else "（不在上游清单里，请确认拼写）"
         return UiResponse.json({"ok": True, "model": model, "message": f"默认模型已切换为 {model}{note}"})
+
+    def set_available_models(self, payload: Mapping[str, Any]) -> UiResponse:
+        """改可用模型白名单：非空时只有列出的模型能被调用（空 = 全部可用）。
+
+        属于模型配置（控制台「默认模型」卡片里选择式设置），与「运行参数」无关。
+        """
+        raw = payload.get("models")
+        if raw is None:
+            return UiResponse.error("缺少 models 字段")
+        if not isinstance(raw, (list, tuple)):
+            return UiResponse.error("可用模型必须是模型名数组，例如 [\"deepseek-v4.1-flash\"]")
+        cleaned: list[str] = []
+        for item in raw:
+            if not isinstance(item, str):
+                return UiResponse.error(f"可用模型只接受字符串，收到 {item!r}")
+            name = item.strip()
+            if name and name not in cleaned:
+                cleaned.append(name)
+        flt = getattr(self.config, "model_filter", None)
+        current = list(flt.available) if flt is not None else []
+        if cleaned == current:
+            return UiResponse.json({"ok": True, "message": "可用模型没有变化"})
+        with self.lock:
+            self.rotator.set_model_filter(cleaned)
+            self.store.set_section("model_filter", {"available": cleaned})
+            self.store.reload()
+        label = "全部（不限）" if not cleaned else "、".join(cleaned)
+        self._save_and_log(f"可用模型更新为 {label}")
+        return UiResponse.json({"ok": True, "message": f"可用模型已更新：{label}"})
 
     def set_options(self, payload: Mapping[str, Any]) -> UiResponse:
         """改运行参数：调度策略 / 限速 / 重试预算。改动立即生效并落盘。"""
@@ -706,7 +737,7 @@ class ConsoleState:
                     return self.add_keys(
                         str(payload.get("keys") or payload.get("key") or ""),
                         account=(str(payload.get("account")).strip() or None) if payload.get("account") else None,
-                        max_concurrency=_clamp_int(payload.get("max_concurrency"), 4, 1, 64),
+                        max_concurrency=_clamp_int(payload.get("max_concurrency"), 16, 1, 256),
                         rpm_limit=rpm_limit,
                     )
                 if path == "/api/keys/verify":
@@ -715,6 +746,8 @@ class ConsoleState:
                     return self.remove_one(str(payload.get("id") or payload.get("key") or ""))
                 if path == "/api/model":
                     return self.set_model(str(payload.get("model") or ""))
+                if path == "/api/model/available":
+                    return self.set_available_models(payload)
                 if path == "/api/models/refresh":
                     return self.refresh_models()
                 if path == "/api/options":

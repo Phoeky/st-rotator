@@ -106,7 +106,7 @@ class AccountState:
         name: str,
         *,
         rpm_limit: int | None = None,
-        max_concurrency: int = 4,
+        max_concurrency: int = 16,
         weight: float = 1.0,
     ) -> None:
         self.name = name
@@ -147,8 +147,8 @@ class ApiKey:
 
     __slots__ = (
         "key", "account", "rpm_limit", "max_concurrency", "weight", "tags",
-        "status", "cooldown_until", "consecutive_failures", "inflight",
-        "last_used", "last_error", "stats", "_window", "account_state",
+        "status", "cooldown_until", "pending_cooldown", "consecutive_failures",
+        "inflight", "last_used", "last_error", "stats", "_window", "account_state",
     )
 
     def __init__(
@@ -157,7 +157,7 @@ class ApiKey:
         account: str,
         *,
         rpm_limit: int | None = None,
-        max_concurrency: int = 4,
+        max_concurrency: int = 16,
         weight: float = 1.0,
         tags: Sequence[str] = (),
         account_state: AccountState | None = None,
@@ -170,6 +170,7 @@ class ApiKey:
         self.tags = list(tags)
         self.status = KeyStatus.HEALTHY
         self.cooldown_until = 0.0
+        self.pending_cooldown = 0.0  # 在途期间挂起的冷却：全部归还后才起算
         self.consecutive_failures = 0
         self.inflight = 0
         self.last_used = 0.0
@@ -218,6 +219,9 @@ class ApiKey:
             return False
         if self.status is KeyStatus.INVALID:
             return False
+        if self.status is KeyStatus.COOLDOWN:
+            # 冷却中的 Key 一律不接新请求（含"冷却被在途挂起、尚未起算"的窗口）
+            return False
         if self.inflight >= self.max_concurrency:
             return False
         if self.account_state is not None and not self.account_state.is_usable(now):
@@ -227,6 +231,9 @@ class ApiKey:
     def to_dict(self, now: float) -> dict[str, object]:
         self._prune(now)
         cooldown = max(0.0, self.cooldown_until - now)
+        if self.pending_cooldown > 0:
+            # 在途挂起的冷却还没起算：先把待起算的时长展示出来，避免看起来"已冷却完"
+            cooldown = max(cooldown, self.pending_cooldown)
         if self.account_state is not None:
             cooldown = max(cooldown, self.account_state.cooldown_until - now)
             window_len = len(self.account_state._window)
@@ -330,7 +337,7 @@ class KeyPool:
         account: str = "default",
         *,
         rpm_limit: int | None = None,
-        max_concurrency: int = 4,
+        max_concurrency: int = 16,
         weight: float = 1.0,
         tags: Sequence[str] = (),
     ) -> ApiKey:
@@ -464,12 +471,22 @@ class KeyPool:
             self.release(key)
 
     def release(self, key: ApiKey) -> None:
-        """归还 Key：只减 inflight；若期间没有 report_* 改写状态，把"在途中"还原为可用。"""
+        """归还 Key：只减 inflight；若期间没有 report_* 改写状态，把"在途中"还原为可用。
+
+        冷却若是在途期间判下的（见 :meth:`_mark_cooldown`），这里在全部归还后
+        才开始起算完整冷却——在途中不计入冷却时间。
+        """
         with self._cond:
             if key.inflight > 0:
                 key.inflight -= 1
             if key.status is KeyStatus.INFLIGHT:
                 key.status = KeyStatus.HEALTHY
+            if key.inflight == 0:
+                if key.status is KeyStatus.COOLDOWN and key.pending_cooldown > 0:
+                    key.cooldown_until = max(key.cooldown_until, self._clock() + key.pending_cooldown)
+                    key.pending_cooldown = 0.0
+                else:
+                    key.pending_cooldown = 0.0  # 状态已被改写（成功/失效等），挂起的冷却作废
             if key.account_state is not None and key.account_state.inflight > 0:
                 key.account_state.inflight -= 1
             self._cond.notify_all()
@@ -564,11 +581,26 @@ class KeyPool:
         for key in self._keys:
             if key.cooldown_until and key.cooldown_until <= now:
                 key.cooldown_until = 0.0
+                key.pending_cooldown = 0.0
                 key.status = KeyStatus.HEALTHY
                 key.consecutive_failures = 0
                 key.last_error = ""
 
     # ------------------------------------------------------------ 结果上报
+
+    def _mark_cooldown(self, key: ApiKey, delay: float) -> None:
+        """把一把 Key 标记为冷却（调用方需持锁）。
+
+        在途（inflight > 0）时只挂起冷却、不起算：等 release 全部归还后再起算
+        完整 delay，避免在途占用时间被算进冷却——否则并发请求一多，
+        冷却时长会被在途时间悄悄抵扣，形同虚设。
+        """
+        if key.inflight > 0:
+            key.pending_cooldown = max(key.pending_cooldown, delay)
+        else:
+            key.cooldown_until = max(key.cooldown_until, self._clock() + delay)
+            key.pending_cooldown = 0.0
+        key.status = KeyStatus.COOLDOWN
 
     def report_success(self, key: ApiKey, latency: float | None = None) -> None:
         with self._cond:
@@ -594,9 +626,8 @@ class KeyPool:
             delay = self.cooldown.for_attempt(key.consecutive_failures, self._rng)
             if retry_after and retry_after > delay:
                 delay = min(retry_after, self.cooldown.max * 4)  # 尊重服务端建议，但别被拖死
-            key.status = KeyStatus.COOLDOWN
-            key.cooldown_until = self._clock() + delay
             key.last_error = f"429 rate limited (#{key.consecutive_failures})"
+            self._mark_cooldown(key, delay)
 
             # 同步冷却同一账号下的所有 Key，防止连环送死！
             if key.account_state is not None:
@@ -605,9 +636,8 @@ class KeyPool:
                 key.account_state.last_error = key.last_error
                 for sibling in self._keys:
                     if sibling.account_state is key.account_state and sibling.status is not KeyStatus.INVALID:
-                        sibling.status = KeyStatus.COOLDOWN
-                        sibling.cooldown_until = max(sibling.cooldown_until, key.account_state.cooldown_until)
                         sibling.last_error = key.last_error
+                        self._mark_cooldown(sibling, delay)
 
             self._cond.notify_all()
             return delay
@@ -618,9 +648,8 @@ class KeyPool:
             key.stats.server_errors += 1
             key.stats.failures += 1
             delay = self.cooldown.server_error
-            key.status = KeyStatus.COOLDOWN
-            key.cooldown_until = max(key.cooldown_until, self._clock() + delay)
             key.last_error = detail or "server/network error"
+            self._mark_cooldown(key, delay)
             self._cond.notify_all()
             return delay
 
@@ -656,17 +685,14 @@ class KeyPool:
             delay = max(0.0, self.cooldown.model_unavailable)
             if delay <= 0:
                 return 0.0
-            until = self._clock() + delay
-            key.status = KeyStatus.COOLDOWN
-            key.cooldown_until = max(key.cooldown_until, until)
+            self._mark_cooldown(key, delay)
             if key.account_state is not None:
-                key.account_state.cooldown_until = max(key.account_state.cooldown_until, until)
+                key.account_state.cooldown_until = max(key.account_state.cooldown_until, self._clock() + delay)
                 key.account_state.last_error = key.last_error
                 for sibling in self._keys:
                     if sibling.account_state is key.account_state and sibling.status is not KeyStatus.INVALID:
-                        sibling.status = KeyStatus.COOLDOWN
-                        sibling.cooldown_until = max(sibling.cooldown_until, until)
                         sibling.last_error = key.last_error
+                        self._mark_cooldown(sibling, delay)
             self._cond.notify_all()
             return delay
 

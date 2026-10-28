@@ -695,6 +695,8 @@ def create_server(
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
     server.allow_reuse_address = True
+    # 短突发时 listen 队列别一满就丢连接：并发能力的一部分
+    server.request_queue_size = 128
     return server
 
 

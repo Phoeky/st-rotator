@@ -158,8 +158,8 @@ class HttpClient:
         timeout: float = 60.0,
         connect_timeout: float = 10.0,
         headers: Mapping[str, str] | None = None,
-        max_connections: int = 100,
-        max_keepalive: int = 20,
+        max_connections: int = 512,
+        max_keepalive: int = 64,
         verify: bool = True,
         handler: Callable[[Request], Response] | None = None,
     ) -> None:
