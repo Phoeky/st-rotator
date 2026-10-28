@@ -11,9 +11,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#)
-[![Release](https://img.shields.io/badge/release-v1.6.0-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v1.6.0)
+[![Release](https://img.shields.io/badge/release-v1.6.1-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v1.6.1)
 
-> 📦 **Windows 用户**：[下载 `st-rotator-1.6.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v1.6.0/st-rotator-1.6.0-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
+> 📦 **Windows 用户**：[下载 `st-rotator-1.6.1-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v1.6.1/st-rotator-1.6.1-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
 
 ![控制台](docs/console.png)
 
@@ -58,11 +58,11 @@
 
 ### Windows 免安装（推荐）
 
-从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v1.6.0) 下载 **[`st-rotator-1.6.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v1.6.0/st-rotator-1.6.0-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
+从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v1.6.1) 下载 **[`st-rotator-1.6.1-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v1.6.1/st-rotator-1.6.1-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
 
 | 文件 | 用途 |
 |---|---|
-| `st-rotator-1.6.0-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
+| `st-rotator-1.6.1-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
 
 > ⚠️ **不要解压到 `C:\Program Files`**：程序运行时会往 **exe 同目录**写 `config.json`、`rotator.log`、`subkeys.json`、`.tray-token`、`.tray-icons/`，放到无写权限的目录会失败。
 

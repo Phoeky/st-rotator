@@ -214,6 +214,44 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     color: var(--amber); border-radius: 10px; padding: 10px 15px; font-size: 12.5px; line-height: 1.7;
   }
   svg.spark { display: block; width: 100%; height: 34px; margin-top: 6px; }
+
+  /* 可用模型：下拉多选 */
+  .avail-pick { position: relative; }
+  .avail-trigger {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    width: 100%; padding: 8px 10px; text-align: left; cursor: pointer;
+    font-family: inherit; font-size: 12.5px; color: var(--text);
+    background: var(--card); border: 1px solid var(--border-strong); border-radius: 7px;
+  }
+  .avail-trigger:hover { border-color: var(--accent); }
+  .avail-trigger .caret { color: var(--muted); font-size: 10px; transition: transform .15s; }
+  .avail-pick.open .avail-trigger .caret { transform: rotate(180deg); }
+  .avail-trigger-label {
+    display: flex; align-items: center; gap: 5px; flex-wrap: wrap; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .avail-chip {
+    display: inline-block; max-width: 230px; overflow: hidden; text-overflow: ellipsis;
+    padding: 1px 9px; border-radius: 20px; font-family: var(--mono); font-size: 11px;
+    background: var(--accent-soft); color: var(--accent); white-space: nowrap;
+  }
+  .avail-drop {
+    position: absolute; z-index: 60; top: calc(100% + 4px); left: 0; right: 0;
+    background: var(--card); border: 1px solid var(--border-strong); border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.28); padding: 8px;
+  }
+  .avail-list { max-height: 210px; overflow-y: auto; margin-top: 6px; }
+  .avail-item {
+    display: flex; align-items: center; gap: 8px; padding: 5px 7px;
+    border-radius: 5px; cursor: pointer; font-family: var(--mono); font-size: 12px;
+  }
+  .avail-item:hover { background: var(--accent-soft); }
+  .avail-item input { width: auto; margin: 0; flex-shrink: 0; }
+  .avail-item.sel { color: var(--accent); }
+  .avail-foot {
+    display: flex; align-items: center; gap: 8px; margin-top: 8px;
+    border-top: 1px solid var(--border); padding-top: 8px;
+  }
 </style>
 </head>
 <body>
@@ -259,13 +297,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
         <label class="field">
           <span>可用模型（留空 = 全部可用；选择后只有这些模型能被调用，网关会真实拦截清单外的请求）</span>
-          <select id="opt-available" multiple size="6" style="font-family:var(--mono);height:auto"></select>
         </label>
-        <div class="row" style="justify-content:flex-end;margin:6px 0 10px">
-          <button class="tiny" id="btn-avail-all">全选</button>
-          <button class="tiny" id="btn-avail-none" style="margin-left:6px">清空</button>
+        <div class="avail-pick" id="avail-pick">
+          <button type="button" class="avail-trigger" id="avail-trigger">
+            <span class="avail-trigger-label" id="avail-trigger-label">全部（不限）</span>
+            <span class="caret">▾</span>
+          </button>
+          <div class="avail-drop" id="avail-drop" hidden>
+            <input id="avail-search" type="text" placeholder="筛选模型…" autocomplete="off">
+            <div class="avail-list" id="avail-list"></div>
+            <div class="avail-foot">
+              <span class="muted" id="avail-count" style="flex:1;font-size:11.5px"></span>
+              <button class="tiny" id="btn-avail-all" type="button">全选</button>
+              <button class="tiny" id="btn-avail-none" type="button">清空</button>
+            </div>
+          </div>
         </div>
-        <div class="row">
+        <div class="row" style="margin-top:8px">
           <button class="primary grow" id="btn-apply-available">应用可用模型</button>
         </div>
         <div class="muted" style="font-size:11.5px;margin-top:8px">
@@ -692,17 +740,16 @@ function renderModels(state) {
   }).join("") || '<option value="">（无可用模型）</option>';
   select.dataset.current = current || "";
 
-  // 可用模型：多选，随模型清单一起绘制。以已保存的白名单为准
-  //（含不在最新清单里的历史项，方便取消勾选）；用户正在操作时不清空其选择。
-  var av = $("opt-available");
-  if (document.activeElement !== av) {
-    var saved = state.available_models || [];
-    var availIds = S.models.map(function (m) { return m.id; });
-    saved.forEach(function (id) { if (availIds.indexOf(id) === -1) availIds.push(id); });
-    av.innerHTML = availIds.map(function (id) {
-      return '<option value="' + esc(id) + '"' + (saved.indexOf(id) !== -1 ? " selected" : "") + '>' + esc(id) + '</option>';
-    }).join("");
+  // 可用模型：下拉多选。勾选状态保存在 availSelected（周期刷新不打断用户操作）；
+  // 已保存白名单里不在最新清单的模型保留为历史项，方便取消勾选。
+  availIds = S.models.map(function (m) { return m.id; });
+  (state.available_models || []).forEach(function (id) {
+    if (availIds.indexOf(id) === -1) availIds.push(id);
+  });
+  if (availSelected === null || !availDirty) {
+    availSelected = (state.available_models || []).slice();
   }
+  renderAvail();
 
   // 注意：详情写在 #model-meta，条数写在 #model-count。两者必须分开——
   // 早先共用一个元素时，"共 N 个模型"会把模型详情覆盖掉，详情永远看不见。
@@ -904,18 +951,69 @@ async function onApplyModel() {
   } catch (err) { toast(err.message, "err"); }
 }
 
+var availSelected = null; // 可用模型下拉多选：当前勾选（null = 还没同步过服务器白名单）
+var availDirty = false;   // 用户改过勾选但还没点「应用」
+var availIds = [];        // 下拉可选项：最新模型清单 + 已保存白名单里的历史项
+
 async function onApplyAvailable() {
-  var av = $("opt-available");
-  var models = [];
-  Array.prototype.forEach.call(av.options, function (o) { if (o.selected) models.push(o.value); });
+  var models = (availSelected || []).slice();
   try {
     var result = await api("/api/model/available", {
       method: "POST",
       body: JSON.stringify({ models: models })
     });
     toast(result.message, "ok");
+    availDirty = false;
     await refreshState();
   } catch (err) { toast(err.message, "err"); }
+}
+
+/* ---------------------------------------------- 可用模型：下拉多选渲染 */
+function renderAvail() { renderAvailTrigger(); renderAvailList(); }
+
+function renderAvailTrigger() {
+  var label = $("avail-trigger-label");
+  var sel = availSelected || [];
+  if (!sel.length) { label.textContent = "全部（不限）"; return; }
+  var shown = sel.length;
+  var rest = "";
+  if (sel.length > 3) { shown = 3; rest = " +" + (sel.length - 3); }
+  var chips = [];
+  for (var i = 0; i < shown; i++) {
+    chips.push('<span class="avail-chip" title="' + esc(sel[i]) + '">' + esc(sel[i]) + "</span>");
+  }
+  label.innerHTML = chips.join("") + (rest ? '<span class="muted" style="font-size:11px">' + rest + "</span>" : "");
+}
+
+function renderAvailList() {
+  var list = $("avail-list");
+  var q = ($("avail-search").value || "").trim().toLowerCase();
+  var sel = availSelected || [];
+  var frag = [];
+  availIds.forEach(function (id) {
+    if (q && id.toLowerCase().indexOf(q) === -1) return;
+    var on = sel.indexOf(id) !== -1;
+    frag.push('<label class="avail-item' + (on ? " sel" : "") + '" data-id="' + esc(id) + '">'
+      + '<input type="checkbox"' + (on ? " checked" : "") + '>'
+      + '<span style="overflow:hidden;text-overflow:ellipsis">' + esc(id) + "</span></label>");
+  });
+  list.innerHTML = frag.join("") || '<div class="muted" style="font-size:12px;padding:6px">没有匹配的模型</div>';
+  $("avail-count").textContent = "已选 " + sel.length + " 项 / 共 " + availIds.length + " 个模型" + (q ? "（筛选）" : "");
+  Array.prototype.forEach.call(list.querySelectorAll(".avail-item"), function (item) {
+    item.addEventListener("change", syncAvailFromDom);
+  });
+}
+
+function syncAvailFromDom() {
+  availSelected = [];
+  Array.prototype.forEach.call($("avail-list").querySelectorAll(".avail-item"), function (item) {
+    var cb = item.querySelector("input");
+    item.classList.toggle("sel", cb.checked);
+    if (cb.checked) availSelected.push(item.getAttribute("data-id"));
+  });
+  availDirty = true;
+  renderAvailTrigger();
+  $("avail-count").textContent = "已选 " + availSelected.length + " 项 / 共 " + availIds.length + " 个模型";
 }
 
 async function onApplyOptions() {
@@ -1234,12 +1332,36 @@ function bind() {
   $("sk-name").addEventListener("keydown", function (event) { if (event.key === "Enter") onSubkeyCreate(); });
   $("btn-apply-model").onclick = onApplyModel;
   $("btn-apply-available").onclick = onApplyAvailable;
-  $("btn-avail-all").onclick = function () {
-    Array.prototype.forEach.call($("opt-available").options, function (o) { o.selected = true; });
+  $("avail-trigger").onclick = function (ev) {
+    ev.stopPropagation();
+    var open = $("avail-pick").classList.toggle("open");
+    $("avail-drop").hidden = !open;
+    if (open) $("avail-search").focus();
   };
-  $("btn-avail-none").onclick = function () {
-    Array.prototype.forEach.call($("opt-available").options, function (o) { o.selected = false; });
+  $("avail-search").addEventListener("input", function () { renderAvailList(); });
+  $("avail-search").addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape") { $("avail-pick").classList.remove("open"); $("avail-drop").hidden = true; }
+  });
+  $("btn-avail-all").onclick = function (ev) {
+    ev.stopPropagation();
+    availSelected = availIds.slice();
+    availDirty = true;
+    renderAvail();
   };
+  $("btn-avail-none").onclick = function (ev) {
+    ev.stopPropagation();
+    availSelected = [];
+    availDirty = true;
+    renderAvail();
+  };
+  document.addEventListener("click", function (ev) {
+    var pick = $("avail-pick");
+    if (!pick.classList.contains("open")) return;
+    if (!pick.contains(ev.target)) {
+      pick.classList.remove("open");
+      $("avail-drop").hidden = true;
+    }
+  });
   $("btn-apply-options").onclick = onApplyOptions;
   $("btn-models").onclick = async function () {
     try { await api("/api/models/refresh", { method: "POST" }); await refreshState(); toast("模型清单已刷新", "ok"); }
