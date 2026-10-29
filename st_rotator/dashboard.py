@@ -421,6 +421,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </label>
         <button class="primary" id="btn-apply-options" style="height:33px">应用</button>
       </div>
+      <div class="row" style="margin-bottom:12px">
+        <label class="field" style="width:180px;margin-bottom:0">
+          <span>重试退避模式</span>
+          <select id="opt-backoff-mode">
+            <option value="exponential">exponential · 指数（0.5s 起翻倍，8s 封顶）</option>
+            <option value="fixed">fixed · 固定（每次都等同样久）</option>
+          </select>
+        </label>
+        <label class="field" style="width:150px;margin-bottom:0">
+          <span>固定退避秒数</span>
+          <input id="opt-fixed-backoff" type="number" step="0.5" min="0" max="600">
+        </label>
+      </div>
       <div class="row" style="margin-bottom:12px;align-items:flex-end;flex-wrap:wrap">
         <label class="field" style="width:auto;margin-bottom:0;flex-direction:row;align-items:center;gap:6px">
           <input id="opt-fx-enabled" type="checkbox" style="width:auto;margin:0">
@@ -874,6 +887,13 @@ function renderOptions(state) {
   if (document.activeElement !== wait) wait.value = opt.max_total_wait;
   var attempts = $("opt-attempts");
   if (document.activeElement !== attempts) attempts.value = opt.max_attempts;
+  var bmode = $("opt-backoff-mode");
+  if (document.activeElement !== bmode) bmode.value = opt.backoff_mode || "exponential";
+  var fback = $("opt-fixed-backoff");
+  if (document.activeElement !== fback) fback.value = (opt.fixed_backoff == null ? "" : opt.fixed_backoff);
+  // 固定秒数只在 fixed 模式下有意义，指数模式灰掉避免误以为能调
+  fback.disabled = bmode.value !== "fixed";
+  fback.style.opacity = fback.disabled ? "0.45" : "1";
   var fx = opt.flash_lite || {};
   var fe = $("opt-fx-enabled");
   if (document.activeElement !== fe) fe.checked = !!fx.enabled;
@@ -1063,6 +1083,8 @@ async function onApplyOptions() {
     qps: parseFloat($("opt-qps").value),
     max_total_wait: parseFloat($("opt-wait").value),
     max_attempts: parseInt($("opt-attempts").value, 10),
+    backoff_mode: $("opt-backoff-mode").value,
+    fixed_backoff: parseFloat($("opt-fixed-backoff").value),
     flash_lite: {
       enabled: $("opt-fx-enabled").checked,
       image_enabled: $("opt-fx-image").checked,
@@ -1403,6 +1425,11 @@ function bind() {
     }
   });
   $("btn-apply-options").onclick = onApplyOptions;
+  $("opt-backoff-mode").onchange = function () {
+    var fixed = $("opt-fixed-backoff");
+    fixed.disabled = this.value !== "fixed";
+    fixed.style.opacity = fixed.disabled ? "0.45" : "1";
+  };
   $("btn-models").onclick = async function () {
     try { await api("/api/models/refresh", { method: "POST" }); await refreshState(); toast("模型清单已刷新", "ok"); }
     catch (err) { toast(err.message, "err"); }

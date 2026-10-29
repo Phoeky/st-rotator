@@ -19,6 +19,9 @@ from .errors import ConfigError
 # 支持的调度策略
 STRATEGIES = ("round_robin", "least_inflight", "least_recent", "weighted")
 
+# 重试退避模式：指数（1s→2s→4s→8s）或固定（每次都等同样久）
+BACKOFF_MODES = ("exponential", "fixed")
+
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
@@ -109,10 +112,10 @@ class CooldownConfig:
     """冷却策略参数。
 
     Attributes:
-        base: 首次 429 的冷却秒数。**应 ≈ 上游的限流恢复窗口**——
-            填小了会让已经撞墙的 Key 在几秒后被反复重试，全是白打的请求
-            （实测商汤的窗口是 60s，用 3s 会把重试放大 3 倍以上）。
-        factor: 连续 429 时冷却的指数放大系数。
+        base: 首次 429 的冷却秒数。默认 30s，配合 factor=2、max=90 得到
+             「30s → 60s → 90s」的实测序列（第 3 次起封顶在 90s）。
+             填小了会让已经撞墙的 Key 在几秒后被反复重试，全是白打的请求。
+        factor: 连续 429 时冷却的放大系数（默认 2，即每次翻倍）。
         max: 单次冷却上限秒数（防止退避到不可用）。
         jitter: 抖动比例，取 [0, jitter] 的随机比例叠加，避免多进程同时苏醒。
         invalid_ttl: Key 被判失效后的复活探测间隔；<=0 表示永久失效。
@@ -122,9 +125,9 @@ class CooldownConfig:
             给一个中短冷却让调度跳过它、到期自动复探。0 表示不冷却（旧行为）。
     """
 
-    base: float = 60.0
-    factor: float = 1.5
-    max: float = 120.0
+    base: float = 30.0
+    factor: float = 2.0
+    max: float = 90.0
     jitter: float = 0.5
     invalid_ttl: float = 600.0
     server_error: float = 2.0
@@ -352,8 +355,14 @@ class Config:
     # 额度耗尽时所有 Key 会冷却数分钟，干等会把首字延迟拖到分钟级。
     acquire_fail_fast: float = 15.0
     max_total_wait: float = 90.0
+    # 重试退避模式：
+    #   exponential —— retry_backoff 起按 2 的幂增长，max_retry_backoff 封顶，再叠 30% 抖动；
+    #   fixed       —— 每次都等同样的 fixed_backoff 秒，节奏可预测。
+    backoff_mode: str = "exponential"
     retry_backoff: float = 0.5
     max_retry_backoff: float = 8.0
+    # fixed 模式下的固定等待秒数（默认 1s）。
+    fixed_backoff: float = 1.0
 
     # 主动限流
     rate_control: RateControlConfig = field(default_factory=RateControlConfig)
@@ -389,6 +398,10 @@ class Config:
             raise ConfigError("max_total_wait 不能为负")
         if self.acquire_fail_fast < 0:
             raise ConfigError("acquire_fail_fast 不能为负")
+        if self.backoff_mode not in BACKOFF_MODES:
+            raise ConfigError(f"backoff_mode 必须是 {BACKOFF_MODES} 之一，当前为 {self.backoff_mode!r}")
+        if self.fixed_backoff < 0:
+            raise ConfigError("fixed_backoff 不能为负")
         if not self.base_url.startswith(("http://", "https://")):
             raise ConfigError(f"base_url 必须以 http(s):// 开头，当前为 {self.base_url!r}")
         self.base_url = self.base_url.rstrip("/")
@@ -451,6 +464,10 @@ class Config:
             "strategy": self.strategy,
             "max_attempts": self.max_attempts,
             "max_total_wait": self.max_total_wait,
+            "backoff_mode": self.backoff_mode,
+            "retry_backoff": self.retry_backoff,
+            "max_retry_backoff": self.max_retry_backoff,
+            "fixed_backoff": self.fixed_backoff,
             "rate_control": {
                 "mode": self.rate_control.mode,
                 "qps": self.rate_control.qps,
@@ -478,6 +495,7 @@ _SCALAR_FIELDS: dict[str, type] = {
     "acquire_fail_fast": float,
     "retry_backoff": float,
     "max_retry_backoff": float,
+    "fixed_backoff": float,
     "max_connections": int,
     "max_keepalive": int,
 }
@@ -623,6 +641,18 @@ class ConfigStore:
             raise ConfigError(f"strategy 必须是 {STRATEGIES} 之一，当前为 {strategy!r}")
         self._raw["strategy"] = strategy
         return strategy
+
+    def set_backoff(self, *, mode: str | None = None, fixed_seconds: float | None = None) -> dict[str, Any]:
+        """改写退避配置：模式（exponential / fixed）与固定模式下的秒数。"""
+        if mode is not None:
+            if mode not in BACKOFF_MODES:
+                raise ConfigError(f"backoff_mode 必须是 {BACKOFF_MODES} 之一，当前为 {mode!r}")
+            self._raw["backoff_mode"] = mode
+        if fixed_seconds is not None:
+            if fixed_seconds < 0:
+                raise ConfigError("fixed_backoff 不能为负")
+            self._raw["fixed_backoff"] = fixed_seconds
+        return {"mode": self._raw.get("backoff_mode"), "fixed_seconds": self._raw.get("fixed_backoff")}
 
     def set_rate_control(self, **changes: Any) -> dict[str, Any]:
         """只把用户真正改动的字段写回文件，其余保持原样。"""

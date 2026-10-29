@@ -22,7 +22,15 @@ from dataclasses import replace
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-from .config import AccountConfig, Config, ModelFilterConfig, RateControlConfig, STRATEGIES, next_account_name
+from .config import (
+    BACKOFF_MODES,
+    AccountConfig,
+    Config,
+    ModelFilterConfig,
+    RateControlConfig,
+    STRATEGIES,
+    next_account_name,
+)
 from .errors import (
     AllKeysInvalid,
     ApiError,
@@ -639,6 +647,26 @@ class StRotator:
         self._log(f"[配置] 调度策略切换为 {strategy}")
         return strategy
 
+    def set_backoff(self, *, mode: str | None = None, fixed_seconds: float | None = None) -> dict[str, Any]:
+        """切换重试退避模式（exponential / fixed）或固定模式下的秒数。
+
+        改完立即生效：下一次重试就按新策略等待，不需要重启。
+        """
+        if mode is not None:
+            if mode not in BACKOFF_MODES:
+                raise ConfigError(f"backoff_mode 必须是 {BACKOFF_MODES} 之一，当前为 {mode!r}")
+            self.config.backoff_mode = mode
+        if fixed_seconds is not None:
+            if fixed_seconds < 0:
+                raise ConfigError("fixed_backoff 不能为负")
+            self.config.fixed_backoff = fixed_seconds
+        self._log(
+            f"[配置] 退避模式={self.config.backoff_mode}"
+            + (f"（固定 {self.config.fixed_backoff:g}s）" if self.config.backoff_mode == "fixed" else
+               f"（{self.config.retry_backoff:g}s 起、{self.config.max_retry_backoff:g}s 封顶）")
+        )
+        return {"mode": self.config.backoff_mode, "fixed_seconds": self.config.fixed_backoff}
+
     def set_rate_control(self, **changes: Any) -> dict[str, Any]:
         """调整主动限速参数，并按新模式重建限速器。
 
@@ -819,7 +847,19 @@ class StRotator:
         return payload
 
     def _backoff(self, attempt: int) -> float:
-        delay = min(self.config.retry_backoff * (2 ** (attempt - 1)), self.config.max_retry_backoff)
+        """第 N 次重试前的等待秒数。
+
+        两种模式：
+          fixed       —— 每次都是固定秒数（默认 1s），节奏可预测，
+                         适合上游限流窗口很短、只想"错开一下"的场景；
+          exponential —— 从 retry_backoff 起按 2 的幂增长、max_retry_backoff 封顶，
+                         适合额度耗尽这类"越撞越慢"的场景。
+        两种模式都叠 30% 以内的抖动，避免多个进程/并发同时苏醒再撞一次。
+        """
+        if self.config.backoff_mode == "fixed":
+            delay = self.config.fixed_backoff
+        else:
+            delay = min(self.config.retry_backoff * (2 ** (attempt - 1)), self.config.max_retry_backoff)
         return delay + self._rng.uniform(0.0, delay * 0.3)
 
     @staticmethod
