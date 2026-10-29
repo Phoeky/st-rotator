@@ -840,16 +840,24 @@ function renderPool(state) {
     });
   }
   var s = state.summary || {};
-  // 右上角「正在尝试用户」：取所有在途请求的调用方并集（同一用户占多把只列一次）
+  // 右上角「正在尝试用户」：以 state.trying_users 为准 —— 它是"请求还在跑"的语义，
+  // 包含轮换退避、等待可用 Key 这些**池里没有 inflight** 的空窗期，所以轮换时也能看到。
+  // 回退到 keys[].inflight_users 汇总，兼容旧后端（只报"此刻正握着 Key"）。
   var activeNames = [];
-  keys.forEach(function (k) {
-    (k.inflight_users || []).forEach(function (u) {
-      if (u && activeNames.indexOf(u) < 0) activeNames.push(u);
+  var trying = state.trying_users;
+  if (trying && trying.length) {
+    trying.forEach(function (u) { if (u && activeNames.indexOf(u) < 0) activeNames.push(u); });
+  } else {
+    keys.forEach(function (k) {
+      (k.inflight_users || []).forEach(function (u) {
+        if (u && activeNames.indexOf(u) < 0) activeNames.push(u);
+      });
     });
-  });
+  }
   var noteText = s.total ? ("在途 " + s.inflight + " / 共 " + s.total + " 把") : "";
   if (activeNames.length) {
-    noteText += (noteText ? " · " : "") + "正在尝试：" + activeNames.join("、");
+    // 文案对齐用户预期：「用户1，用户2正在尝试」
+    noteText += (noteText ? " · " : "") + activeNames.join("，") + "正在尝试";
   }
   $("pool-note").textContent = noteText;
 }

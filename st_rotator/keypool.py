@@ -72,6 +72,40 @@ def key_id(key: str) -> str:
 
 _user_local = threading.local()
 
+# 进程级「正在尝试」注册表：name -> 并发请求数（引用计数）。
+# 为什么需要它：上面那套线程局部只在"持有 Key"期间被 KeyPool 读到，而轮换的真实
+# 时间线是「拿 Key → 撞 429 → 释放 Key → 退避几秒 → 再拿 Key」，**退避与等待可用
+# Key 的阶段池里没有任何 inflight**，所以按 inflight_users 汇总出来的"正在尝试用户"
+# 在控制台上几乎永远抓不到。控制台要的是"这个用户的请求还在跑"，那是**整个请求**
+# 的生命周期，与是否恰好握着 Key 无关，于是用这个进程级计数器单独记一份。
+# dict 保留插入序，即首次注册顺序，保证右上角用户名顺序稳定不跳。
+_trying_lock = threading.Lock()
+_trying: dict[str, int] = {}
+
+
+def _note_trying(name: str) -> None:
+    if not name:
+        return
+    with _trying_lock:
+        _trying[name] = _trying.get(name, 0) + 1
+
+
+def _done_trying(name: str) -> None:
+    if not name:
+        return
+    with _trying_lock:
+        left = _trying.get(name, 0) - 1
+        if left > 0:
+            _trying[name] = left
+        else:
+            _trying.pop(name, None)
+
+
+def trying_users() -> list[str]:
+    """当前正在尝试（请求尚未结束）的调用方名称，按首次出现顺序去重。"""
+    with _trying_lock:
+        return list(_trying)
+
 
 def current_user() -> str:
     """当前线程正在处理的请求的调用方名称；未标注时返回空串。"""
@@ -80,12 +114,18 @@ def current_user() -> str:
 
 @contextlib.contextmanager
 def user_context(name: str) -> Iterator[str]:
-    """标注当前线程的调用方名称，退出时恢复原值（支持嵌套）。"""
+    """标注当前线程的调用方名称，退出时恢复原值（支持嵌套）。
+
+    顺带在整个请求生命周期内登记到 ``trying_users()``：进入即"开始尝试"，
+    退出（含异常/断流）即"结束"，覆盖轮换退避与等 Key 的空窗期。
+    """
     previous = current_user()
     _user_local.name = name or ""
+    _note_trying(name or "")
     try:
         yield name or ""
     finally:
+        _done_trying(name or "")
         _user_local.name = previous
 
 
@@ -813,4 +853,7 @@ class KeyPool:
                 "inflight": sum(k.inflight for k in self._keys),
                 "status_inflight": inflight,
                 "active_users": len(active),
+                # 正在尝试的用户数（请求还在跑，含退避/等 Key 阶段）。
+                # 同样只给数量：summary 会出现在无需鉴权的 /healthz 与 /stats 上。
+                "trying_users": len(trying_users()),
             }

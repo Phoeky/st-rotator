@@ -51,6 +51,7 @@ from .client import StRotator
 from .config import STRATEGIES, Config, ConfigStore, FlashLiteExchangeConfig, RateControlConfig, next_account_name
 from .dashboard import DASHBOARD_HTML
 from .errors import ConfigError, RotatorError
+from .keypool import trying_users
 from .logs import LogBuffer
 from .subkeys import SubKeyManager
 from .version import __version__
@@ -219,6 +220,10 @@ class ConsoleState:
             "gateway": self.gateway_info(),
             "summary": self.rotator.pool.summary(),
             "keys": self.rotator.pool.snapshot(),
+            # 正在尝试的用户名：请求还在跑（含轮换退避、等 Key）即算，
+            # 与 keys[].inflight_users（"此刻正握着哪把 Key"）是两回事。
+            # 名字只走这里（控制台接口需管理 Token），不进 summary / /healthz。
+            "trying_users": trying_users(),
             "rate_control": rate,
             "metrics": metrics,
             "models": self.rotator.available_models(),
