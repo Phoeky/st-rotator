@@ -11,9 +11,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#)
-[![Release](https://img.shields.io/badge/release-v1.6.1-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v1.6.1)
+[![Release](https://img.shields.io/badge/release-v1.7.0-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v1.7.0)
 
-> 📦 **Windows 用户**：[下载 `st-rotator-1.6.1-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v1.6.1/st-rotator-1.6.1-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
+> 📦 **Windows 用户**：[下载 `st-rotator-1.7.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v1.7.0/st-rotator-1.7.0-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
 
 ![控制台](docs/console.png)
 
@@ -58,11 +58,11 @@
 
 ### Windows 免安装（推荐）
 
-从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v1.6.1) 下载 **[`st-rotator-1.6.1-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v1.6.1/st-rotator-1.6.1-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
+从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v1.7.0) 下载 **[`st-rotator-1.7.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v1.7.0/st-rotator-1.7.0-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
 
 | 文件 | 用途 |
 |---|---|
-| `st-rotator-1.6.1-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
+| `st-rotator-1.7.0-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
 
 > ⚠️ **不要解压到 `C:\Program Files`**：程序运行时会往 **exe 同目录**写 `config.json`、`rotator.log`、`subkeys.json`、`.tray-token`、`.tray-icons/`，放到无写权限的目录会失败。
 
@@ -524,7 +524,12 @@ packaging/          # 打包（单 exe：build.py 构建脚本、entry.py 入口
 
 ## 历史版本
 
-- **v1.4.0（当前）**：合并为**单个** `st-rotator.exe`（windowed，约 9 MB），双击即托盘 + 控制台；
+- **v1.7.0（当前）**：控制台新增**指数/固定退避**切换（固定模式默认 1s 可调）；
+  冷却序列改为 **30s → 60s → 90s** 递增；「对外子 Key」栏目更名**用户**，
+  Key 池状态显示归属用户、右上角汇总「正在尝试」的用户名。
+- **v1.6.1**：可用模型改为**下拉多选**（可搜索、全选/清空、勾选不被打断）。
+- **v1.6.0**：模型过滤改为**可用白名单**并真实拦截；Key 池新增在途状态；发布件改裸 exe。
+- **v1.4.0**：合并为**单个** `st-rotator.exe`（windowed，约 9 MB），双击即托盘 + 控制台；
   零配置首启（自动生成空 Key 的 `config.json`，Key 在控制台里添加）。
 - **v1.3.0**：旧的双 exe 形态 —— `st-rotator.exe`（控制台/CLI 版）+ `st-rotator-tray.exe`（无黑窗托盘版），
   首启需手工编辑配置并填 Key。已不再发布，如需旧行为请用对应 tag 的源码自行构建。
