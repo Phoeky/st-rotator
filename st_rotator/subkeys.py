@@ -1,11 +1,11 @@
-"""对外子 Key 管理：为上层应用 / 他人签发独立凭据，并监控其使用情况。
+"""对外用户 Key 管理：为上层应用 / 他人签发独立凭据，并监控其使用情况。
 
-子 Key 与本网关的“管理 Token”（--token）是两套独立凭据：
+用户 Key 与本网关的“管理 Token”（--token）是两套独立凭据：
 
 * 管理 Token：可以访问控制台（/ui、/api/*），也可以调用 /v1/* 接口；
-* 子 Key（sk-sr-...）：只能调用 /v1/* 与健康检查接口，永远不能访问控制台。
+* 用户 Key（sk-sr-...）：只能调用 /v1/* 与健康检查接口，永远不能访问控制台。
 
-每个子 Key 独立统计请求数、成功 / 失败、输入 / 输出 token 与缓存命中次数，
+每个用户 Key 独立统计请求数、成功 / 失败、输入 / 输出 token 与缓存命中次数，
 并保留最近的使用历史，供管理页面监控。数据保存在配置目录下的
 ``subkeys.json``（与 config.json、管理 Token 分开存储），零第三方依赖。
 """
@@ -56,7 +56,7 @@ def _key_id(key: str) -> str:
 
 @dataclass
 class SubKey:
-    """一个对外子 Key 及其用量统计。字段变化均在 SubKeyManager 锁内进行。"""
+    """一个对外用户 Key 及其用量统计。字段变化均在 SubKeyManager 锁内进行。"""
 
     name: str
     key: str
@@ -75,7 +75,7 @@ class SubKey:
 
 
 class SubKeyManager:
-    """子 Key 的存储、认证与用量统计。
+    """用户 Key 的存储、认证与用量统计。
 
     线程安全：所有读写操作在内部 RLock 保护下进行；修改会在后台线程定期
     原子写入 ``subkeys.json``（退出时调用 :meth:`close` 做最后落盘）。
@@ -116,10 +116,10 @@ class SubKeyManager:
         except FileNotFoundError:
             return
         except (OSError, ValueError) as exc:
-            self._logger(f"读取子 Key 数据失败（将使用空数据）：{exc}")
+            self._logger(f"读取用户 Key 数据失败（将使用空数据）：{exc}")
             return
         if not isinstance(data, dict) or data.get("version") != 1:
-            self._logger("子 Key 数据文件版本不识别，已忽略")
+            self._logger("用户 Key 数据文件版本不识别，已忽略")
             return
         for item in data.get("keys", []):
             if not isinstance(item, dict):
@@ -181,7 +181,7 @@ class SubKeyManager:
             self._dirty = False
             return True
         except OSError as exc:
-            self._logger(f"保存子 Key 数据失败：{exc}")
+            self._logger(f"保存用户 Key 数据失败：{exc}")
             return False
 
     def save(self) -> bool:
@@ -205,7 +205,7 @@ class SubKeyManager:
                     if self._dirty:
                         self._save_locked()
             except Exception as exc:  # 自动保存失败不影响网关运行
-                self._logger(f"子 Key 自动保存失败：{exc}")
+                self._logger(f"用户 Key 自动保存失败：{exc}")
 
     # ------------------------------------------------------------------ 查询
 
@@ -218,7 +218,7 @@ class SubKeyManager:
             return any(key.enabled for key in self._keys)
 
     def find(self, identifier: str) -> Optional[SubKey]:
-        """按 id（sha256 前 12 位）、完整 Key 或名称查找子 Key。"""
+        """按 id（sha256 前 12 位）、完整 Key 或名称查找用户 Key。"""
         if not identifier:
             return None
         with self._lock:
@@ -228,7 +228,7 @@ class SubKeyManager:
         return None
 
     def snapshot(self) -> List[Dict[str, Any]]:
-        """全部子 Key 的展示快照（新创建的在前）。"""
+        """全部用户 Key 的展示快照（新创建的在前）。"""
         with self._lock:
             items: List[Dict[str, Any]] = []
             for key in self._keys:
@@ -281,9 +281,9 @@ class SubKeyManager:
     # ------------------------------------------------------------------ 认证
 
     def authenticate(self, supplied: Optional[str]) -> Optional[SubKey]:
-        """校验调用方提供的凭据是否为某个已启用的子 Key。
+        """校验调用方提供的凭据是否为某个已启用的用户 Key。
 
-        返回命中的子 Key；未命中或已停用时返回 None（绝不返回停用 Key）。
+        返回命中的用户 Key；未命中或已停用时返回 None（绝不返回停用 Key）。
         """
         if not supplied:
             return None
@@ -306,7 +306,7 @@ class SubKeyManager:
         estimated: Tuple[int, int] = (0, 0),
         latency_ms: Optional[float] = None,
     ) -> None:
-        """记录一次子 Key 调用。
+        """记录一次用户 Key 调用。
 
         ``usage`` 为上游返回的 (prompt_tokens, completion_tokens, cached_tokens)；
         缺失时用 ``estimated``（(估计输入 token, 估计输出 token)）兜底，
@@ -354,7 +354,7 @@ class SubKeyManager:
     # ------------------------------------------------------------------ 管理操作
 
     def create(self, name: str, note: str = "") -> SubKey:
-        """创建子 Key，返回完整密钥（仅此一次可见，请调用方立即展示给管理员）。"""
+        """创建用户 Key，返回完整密钥（仅此一次可见，请调用方立即展示给管理员）。"""
         name = (name or "").strip()
         if not name:
             raise ValueError("名称不能为空")
@@ -362,7 +362,7 @@ class SubKeyManager:
             raise ValueError("名称最长 64 个字符")
         with self._lock:
             if any(key.name == name for key in self._keys):
-                raise ValueError(f"已存在同名子 Key：{name}")
+                raise ValueError(f"已存在同名用户 Key：{name}")
             sub = SubKey(
                 name=name,
                 key="sk-sr-" + secrets.token_urlsafe(24),
@@ -384,7 +384,7 @@ class SubKeyManager:
                 if len(name) > 64:
                     raise ValueError("名称最长 64 个字符")
                 if any(key.name == name and key is not sub for key in self._keys):
-                    raise ValueError(f"已存在同名子 Key：{name}")
+                    raise ValueError(f"已存在同名用户 Key：{name}")
                 sub.name = name
             if note is not None:
                 sub.note = (note or "").strip()
@@ -392,7 +392,7 @@ class SubKeyManager:
             return sub
 
     def set_enabled(self, identifier: str, enabled: bool) -> SubKey:
-        """启用 / 停用子 Key。停用后该 Key 立即无法通过认证。"""
+        """启用 / 停用用户 Key。停用后该 Key 立即无法通过认证。"""
         sub = self._require(identifier)
         with self._lock:
             sub.enabled = bool(enabled)
@@ -400,7 +400,7 @@ class SubKeyManager:
             return sub
 
     def revoke(self, identifier: str) -> SubKey:
-        """删除子 Key（撤销后该 Key 永久失效，历史记录保留）。"""
+        """删除用户 Key（撤销后该 Key 永久失效，历史记录保留）。"""
         sub = self._require(identifier)
         with self._lock:
             self._keys.remove(sub)
@@ -408,7 +408,7 @@ class SubKeyManager:
             return sub
 
     def reset_usage(self, identifier: str) -> SubKey:
-        """清零该子 Key 的用量统计（不影响历史记录）。"""
+        """清零该用户 Key 的用量统计（不影响历史记录）。"""
         sub = self._require(identifier)
         with self._lock:
             sub.usage = dict(_EMPTY_USAGE)
@@ -418,5 +418,5 @@ class SubKeyManager:
     def _require(self, identifier: str) -> SubKey:
         sub = self.find(identifier)
         if sub is None:
-            raise KeyError("找不到指定的子 Key")
+            raise KeyError("找不到指定的用户 Key")
         return sub

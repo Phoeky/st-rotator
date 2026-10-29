@@ -6,7 +6,7 @@
 
 * 运行状态总览（Key 池、限速、吞吐、运行时长）
 * Key 的增 / 删 / 单把体检 —— 不用再手改配置文件
-* 对外子 Key 的签发 / 管理 / 用量监控（每个子 Key 独立统计输入输出 token、缓存命中）
+* 对外用户 Key 的签发 / 管理 / 用量监控（每个用户 Key 独立统计输入输出 token、缓存命中）
 * 模型选择（清单从上游 ``/models`` 实时拉，带缓存）
 * 网关接入信息 + 各语言可直接复制的接入片段
 * 实时日志（内存环形缓冲，游标增量拉取，不重复传输）
@@ -29,8 +29,8 @@
   所以可以免鉴权加载，Token 由用户在前端输入后存 localStorage。
 * 页面展示的 Key 永远是脱敏值；对 Key 的操作走 ``key_id``（sha256 前 12 位），
   前端拿不到也不需要明文。
-* 对外子 Key（见 ``subkeys.py``）只能调用 ``/v1/*`` 接口，控制台接口与页面一律对其
-  拒绝（401）；子 Key 的完整密钥只在创建时返回一次，页面列表只展示脱敏值。
+* 对外用户 Key（见 ``subkeys.py``）只能调用 ``/v1/*`` 接口，控制台接口与页面一律对其
+  拒绝（401）；用户 Key 的完整密钥只在创建时返回一次，页面列表只展示脱敏值。
 """
 
 from __future__ import annotations
@@ -173,7 +173,7 @@ class ConsoleState:
         token: 本地鉴权 Token；为空表示不鉴权。
         buffer: 日志环形缓冲。
         log_file: 日志文件路径（仅用于展示）。
-        subkeys: 对外子 Key 管理器；为 None 表示未启用子 Key 功能。
+        subkeys: 对外用户 Key 管理器；为 None 表示未启用用户 Key 功能。
     """
 
     store: ConfigStore
@@ -261,7 +261,7 @@ class ConsoleState:
         return {"cursor": new_cursor, "items": items}
 
     def _subkeys_snapshot(self) -> dict[str, Any] | None:
-        """子 Key 区块的状态；未启用时为 None（前端显示不可用提示）。"""
+        """用户 Key 区块的状态；未启用时为 None（前端显示不可用提示）。"""
         if self.subkeys is None:
             return None
         return {
@@ -270,30 +270,30 @@ class ConsoleState:
             "keys": self.subkeys.snapshot(),
         }
 
-    # ------------------------------------------------------------ 子 Key 管理
+    # ------------------------------------------------------------ 用户 Key 管理
 
     def _require_subkeys(self) -> SubKeyManager | None:
         if self.subkeys is None:
-            raise ConfigError("未启用子 Key（缺少 subkeys 管理器）")
+            raise ConfigError("未启用用户功能（缺少 subkeys 管理器）")
         return self.subkeys
 
     def create_subkey(self, name: str, note: str = "") -> UiResponse:
-        """创建一个对外子 Key；完整密钥只在创建响应里返回一次。"""
+        """创建一个对外用户 Key；完整密钥只在创建响应里返回一次。"""
         try:
             manager = self._require_subkeys()
             sub = manager.create(name, note=note)
         except ConfigError:
-            return UiResponse.error("未启用子 Key", status=404)
+            return UiResponse.error("未启用用户功能", status=404)
         except ValueError as exc:  # 名称空 / 太长 / 重名
             return UiResponse.error(str(exc))
-        self._log(f"[子Key] 创建 {sub.name}（{sub.masked}）")
+        self._log(f"[用户] 创建 {sub.name}（{sub.masked}）")
         return UiResponse.json(
             {
                 "ok": True,
                 "id": sub.id,
                 "name": sub.name,
                 "key": sub.key,
-                "message": f"已创建子 Key：{sub.name}。完整密钥只显示这一次，请立即复制保存。",
+                "message": f"已创建用户 Key：{sub.name}。完整密钥只显示这一次，请立即复制保存。",
             }
         )
 
@@ -302,52 +302,52 @@ class ConsoleState:
             manager = self._require_subkeys()
             sub = manager.update(identifier, name=name, note=note)
         except ConfigError:
-            return UiResponse.error("未启用子 Key", status=404)
+            return UiResponse.error("未启用用户功能", status=404)
         except ValueError as exc:
             return UiResponse.error(str(exc))
         except KeyError as exc:
             return UiResponse.error(str(exc), status=404)
-        self._log(f"[子Key] 更新 {sub.name} 信息")
-        return UiResponse.json({"ok": True, "message": f"已更新子 Key：{sub.name}"})
+        self._log(f"[用户] 更新 {sub.name} 信息")
+        return UiResponse.json({"ok": True, "message": f"已更新用户：{sub.name}"})
 
     def toggle_subkey(self, identifier: str, enabled: bool) -> UiResponse:
         try:
             manager = self._require_subkeys()
             sub = manager.set_enabled(identifier, enabled)
         except ConfigError:
-            return UiResponse.error("未启用子 Key", status=404)
+            return UiResponse.error("未启用用户功能", status=404)
         except KeyError as exc:
             return UiResponse.error(str(exc), status=404)
         state = "启用" if sub.enabled else "停用"
-        self._log(f"[子Key] {state} {sub.name}（{sub.masked}）")
-        return UiResponse.json({"ok": True, "enabled": sub.enabled, "message": f"已{state}子 Key：{sub.name}"})
+        self._log(f"[用户] {state} {sub.name}（{sub.masked}）")
+        return UiResponse.json({"ok": True, "enabled": sub.enabled, "message": f"已{state}用户：{sub.name}"})
 
     def revoke_subkey(self, identifier: str) -> UiResponse:
         try:
             manager = self._require_subkeys()
             sub = manager.revoke(identifier)
         except ConfigError:
-            return UiResponse.error("未启用子 Key", status=404)
+            return UiResponse.error("未启用用户功能", status=404)
         except KeyError as exc:
             return UiResponse.error(str(exc), status=404)
-        self._log(f"[子Key] 删除 {sub.name}（{sub.masked}）")
-        return UiResponse.json({"ok": True, "message": f"已删除子 Key：{sub.name}，该 Key 立即失效"})
+        self._log(f"[用户] 删除 {sub.name}（{sub.masked}）")
+        return UiResponse.json({"ok": True, "message": f"已删除用户：{sub.name}，该 Key 立即失效"})
 
     def reset_subkey_usage(self, identifier: str) -> UiResponse:
         try:
             manager = self._require_subkeys()
             sub = manager.reset_usage(identifier)
         except ConfigError:
-            return UiResponse.error("未启用子 Key", status=404)
+            return UiResponse.error("未启用用户功能", status=404)
         except KeyError as exc:
             return UiResponse.error(str(exc), status=404)
-        self._log(f"[子Key] 清零用量：{sub.name}")
-        return UiResponse.json({"ok": True, "message": f"已清零子 Key {sub.name} 的用量统计"})
+        self._log(f"[用户] 清零用量：{sub.name}")
+        return UiResponse.json({"ok": True, "message": f"已清零用户 {sub.name} 的用量统计"})
 
     def subkey_history(self, page: int = 1, page_size: int = 10) -> UiResponse:
-        """子 Key 用量明细分页：默认每页 10 条，最新在前。"""
+        """用户用量明细分页：默认每页 10 条，最新在前。"""
         if self.subkeys is None:
-            return UiResponse.error("未启用子 Key", status=404)
+            return UiResponse.error("未启用用户功能", status=404)
         page = max(1, int(page))
         page_size = max(1, min(100, int(page_size)))
         offset = (page - 1) * page_size

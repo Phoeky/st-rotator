@@ -20,9 +20,9 @@ WorkBuddy / 各类 Agent 框架只认「OpenAI 兼容端点 + API Key」，没�
   response_format……）原样透传给上游。
 * **错误要映射成 OpenAI 的错误结构**，上层框架才能正确识别和重试。
 * **暂停开关**。控制台可以暂停对外服务（返回 503）而进程继续活着，方便临时止损。
-* **子 Key 与鉴权分层**。控制台接口（``/api/*``）只认管理 Token；``/v1/*`` 除了管理
-  Token 还接受签发的对外子 Key（见 ``subkeys.py``）。子 Key 只能调 API，永远不能访问
-  控制台，每次调用都会按子 Key 累计输入 / 输出 token 与缓存命中，供管理页面监控。
+* **用户 Key 与鉴权分层**。控制台接口（``/api/*``）只认管理 Token；``/v1/*`` 除了管理
+  Token 还接受签发的对外用户 Key（见 ``subkeys.py``）。用户 Key 只能调 API，永远不能访问
+  控制台，每次调用都会按用户 Key 累计输入 / 输出 token 与缓存命中，供管理页面监控。
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .client import StRotator, note_serve_begin, note_serve_end
 from .errors import AllKeysInvalid, ApiError, NoAvailableKey, RotationExhausted, RotatorError
+from .keypool import user_context
 from .subkeys import SubKey, SubKeyManager
 from . import ui
 
@@ -202,12 +203,12 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
         return self.rfile.read(length)
 
     def _authenticate(self) -> tuple[str, SubKey | None]:
-        """识别调用方凭据，返回 (角色, 命中的子 Key)。
+        """识别调用方凭据，返回 (角色, 命中的用户 Key)。
 
         角色：
         * "admin" — 匹配管理 Token（--token）；
-        * "sub"   — 匹配某个已启用的对外子 Key（只能调 /v1/*，永远进不了控制台）；
-        * "open"  — 未配置管理 Token 且未启用任何子 Key（完全开放，仅监听本机）；
+        * "sub"   — 匹配某个已启用的对外用户 Key（只能调 /v1/*，永远进不了控制台）；
+        * "open"  — 未配置管理 Token 且未启用任何用户 Key（完全开放，仅监听本机）；
         * None    — 凭据缺失或无效。
         """
         header = self.headers.get("Authorization") or ""
@@ -269,7 +270,7 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
                 forward_headers[key] = val
         return forward_headers
 
-    # ------------------------------------------------------------ 子 Key 用量统计
+    # ------------------------------------------------------------ 用户 Key 用量统计
 
     def _record_subkey_usage(
         self,
@@ -282,10 +283,10 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
         text_len: int = 0,
         latency_ms: float | None = None,
     ) -> None:
-        """把一次调用计入当前请求所用的子 Key（非子 Key 请求为空操作）。
+        """把一次调用计入当前请求所用的用户 Key（非用户 Key 请求为空操作）。
 
         优先用上游返回的 usage；缺失时用 messages / 输出文本长度做粗略估算兜底，
-        保证监控面板上每个子 Key 都有输入、输出两列数据。
+        保证监控面板上每个用户 Key 都有输入、输出两列数据。
         """
         sub = self._auth_subkey
         subkeys = type(self).subkeys
@@ -370,10 +371,10 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             self._send_json(200, self.rotator.status())
             return
         role, sub = self._authenticate()
-        # 控制台：页面免鉴权（空壳，不含密钥），接口要鉴权；子 Key 一律不能访问控制台
+        # 控制台：页面免鉴权（空壳，不含密钥），接口要鉴权；用户 Key 一律不能访问控制台
         if self.console is not None and self.console.is_console_path(path):
             if role == "sub":
-                self._send_json(401, error_payload("子 Key 不能访问控制台", "authentication_error"))
+                self._send_json(401, error_payload("用户 Key 不能访问控制台", "authentication_error"))
                 return
             if path.startswith(ui.API_PREFIX) and role not in ("admin", "open"):
                 self._send_json(401, error_payload("invalid console token", "authentication_error"))
@@ -385,17 +386,8 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             return
         self._auth_role = role
         self._auth_subkey = sub
-        if self._paused:
-            self._send_json(503, error_payload("gateway paused from console", "service_unavailable", "503"))
-            return
-        query_suffix = f"?{parsed.query}" if parsed.query else ""
-        if path == MODELS_PATH:
-            self._forward_simple("GET", f"models{query_suffix}")
-            return
-        if path.startswith("/v1/"):
-            self._forward_simple("GET", f"{path[4:]}{query_suffix}")
-            return
-        self._send_json(404, error_payload(f"unknown path {path}", "invalid_request_error"))
+        with user_context(self._user_label(role, sub)):
+            self._dispatch_proxy("GET", path, query_suffix=f"?{parsed.query}" if parsed.query else "")
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -403,7 +395,7 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
         role, sub = self._authenticate()
         is_console = self.console is not None and path.startswith(ui.API_PREFIX)
         if is_console:
-            # 控制台接口只认管理 Token（或未设 Token 时的开放模式），子 Key 一律拒绝
+            # 控制台接口只认管理 Token（或未设 Token 时的开放模式），用户 Key 一律拒绝
             if role != "admin" and role != "open":
                 self._send_json(401, error_payload("invalid console token", "authentication_error"))
                 return
@@ -428,13 +420,47 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             return
 
         query_suffix = f"?{parsed.query}" if parsed.query else ""
-        if path == CHAT_PATH:
-            self._handle_chat(raw)
+        with user_context(self._user_label(role, sub)):
+            self._dispatch_proxy("POST", path, raw=raw, query_suffix=query_suffix)
+
+    def _dispatch_proxy(self, method: str, path: str, *, raw: bytes = b"", query_suffix: str = "") -> None:
+        """处理对外代理路径（/v1/* 与 /v1/models），调用方已鉴权完毕。
+
+        单独拆出来是为了把 :func:`user_context` 的作用域收在一处：它必须在
+        KeyPool 的 acquire / release 全程有效（流式响应也在同一线程内迭代完），
+        所以"标注调用方"和"真正转发"之间不能隔着一层提前 return 的分支。
+        """
+        if self._paused:
+            self._send_json(503, error_payload("gateway paused from console", "service_unavailable", "503"))
             return
-        if path.startswith("/v1/"):
-            self._forward_simple("POST", f"{path[4:]}{query_suffix}", raw)
-            return
+        if method == "GET":
+            if path == MODELS_PATH:
+                self._forward_simple("GET", f"models{query_suffix}")
+                return
+            if path.startswith("/v1/"):
+                self._forward_simple("GET", f"{path[4:]}{query_suffix}")
+                return
+        else:
+            if path == CHAT_PATH:
+                self._handle_chat(raw)
+                return
+            if path.startswith("/v1/"):
+                self._forward_simple("POST", f"{path[4:]}{query_suffix}", raw)
+                return
         self._send_json(404, error_payload(f"unknown path {path}", "invalid_request_error"))
+
+    def _user_label(self, role: str | None, sub: SubKey | None) -> str:
+        """当前请求在 Key 池里显示成"谁"。
+
+        * 用户 Key 请求 → 用户名称（控制台「用户」栏目里的名字）；
+        * 管理 Token / 开放模式 → "管理端"（自己的调试请求，不该显示成某个用户）；
+        * 其余 → 空串，表示未标注（后台任务同样如此）。
+        """
+        if sub is not None:
+            return sub.name or "未命名用户"
+        if role in ("admin", "open"):
+            return "管理端"
+        return ""
 
     # ------------------------------------------------------------ 具体处理
 
@@ -675,8 +701,8 @@ def create_server(
     """创建网关服务实例（不启动）。
 
     Args:
-        subkeys: 传入子 Key 管理器后启用对外子 Key 鉴权与用量统计
-            （子 Key 只能调 /v1/*，永远不能访问控制台）。
+        subkeys: 传入用户 Key 管理器后启用对外用户 Key 鉴权与用量统计
+            （用户 Key 只能调 /v1/*，永远不能访问控制台）。
     """
     handler = type(
         "BoundRotatorProxyHandler",
@@ -718,7 +744,7 @@ def serve(
     Args:
         console: 传入控制台状态则同时提供 Web 控制台。
         on_ready: 服务已绑定端口、进入循环前回调（用于自动开窗，避免开在服务就绪之前）。
-        subkeys: 传入子 Key 管理器后启用对外子 Key 鉴权与用量统计。
+        subkeys: 传入用户 Key 管理器后启用对外用户 Key 鉴权与用量统计。
     """
     server = create_server(
         rotator, host=host, port=port, token=token, verbose=verbose,
@@ -736,7 +762,7 @@ def serve(
         console.host, console.port = actual_host, actual_port
         lines.append(f"  - 控制台   : http://{actual_host}:{actual_port}/")
     if subkeys is not None:
-        lines.append(f"  - 子 Key    : 已启用（只能调用 API，不能访问控制台）")
+        lines.append("  - 用户 Key  : 已启用（只能调用 API，不能访问控制台）")
     lines.append(
         f"  - 本地鉴权 : {'已开启' if token else '未开启（仅监听本机，建议加 --token）'}"
     )

@@ -51,7 +51,7 @@
 - **本地 OpenAI 兼容网关** —— 上层只看到一个稳定端点，限流、冷却、Key 轮换全部在内部消化
 - **图形控制台** —— 看池子状态、加 / 删 / 体检 Key、切换模型、复制接入片段、看实时日志
 - **系统托盘（Windows）** —— 图标颜色即健康度，双击开控制台，右键可操作
-- **对外子 Key** —— 签发多把独立对外凭据，按子 Key 统计输入 / 输出 token 与缓存命中；子 Key 只能调 API，无法访问管理页面
+- **用户 Key** —— 签发多把独立对外凭据，按用户 Key 统计输入 / 输出 token 与缓存命中；用户 Key 只能调 API，无法访问管理页面
 - **配置热更新** —— 控制台里改完立即生效并落盘，不需要重启任何东西
 
 ## 快速开始
@@ -155,29 +155,29 @@ resp = client.chat.completions.create(
 | `GET /healthz` | 健康检查（**无需 token**，可接监控探针） |
 | `GET /stats` | 每把 Key 的成功 / 失败 / 429 次数、当前自适应速率 |
 
-### 对外子 Key
+### 用户 Key
 
-不想把管理 Token 发给别人时，可以在控制台的「对外子 Key」卡片里签发专用凭据：
+不想把管理 Token 发给别人时，可以在控制台的「用户 Key」卡片里签发专用凭据：
 
 | 能力 | 说明 |
 |---|---|
-| 签发 | 给每个使用方一把独立子 Key（如「前端 Agent」「数据管道」），按名称管理，可加备注 |
+| 签发 | 给每个使用方一把独立用户 Key（如「前端 Agent」「数据管道」），按名称管理，可加备注 |
 | 停用 / 删除 | 停用立即生效；删除后该 Key 作废，历史用量明细仍保留 |
-| 用量监控 | 每把子 Key 独立统计请求数、成功 / 失败、输入 / 输出 token、缓存命中 token；用量明细**分页展示**（默认每页 10 条，最新在前），每条含时间 / 子 Key / 模型 / 流式 / 结果 / 输入 / 输出 / **缓存命中率** / 延迟 |
-| 访问边界 | 子 Key **只能调用 `/v1/*` 与 `/healthz`，无法访问管理页面，也无法通过 `/api/*` 读写配置** |
+| 用量监控 | 每把用户 Key 独立统计请求数、成功 / 失败、输入 / 输出 token、缓存命中 token；用量明细**分页展示**（默认每页 10 条，最新在前），每条含时间 / 用户 Key / 模型 / 流式 / 结果 / 输入 / 输出 / **缓存命中率** / 延迟 |
+| 访问边界 | 用户 Key **只能调用 `/v1/*` 与 `/healthz`，无法访问管理页面，也无法通过 `/api/*` 读写配置** |
 
-- 子 Key 数据保存在配置目录下的 `subkeys.json`（与 `config.json` 同级，由网关自动维护，
+- 用户 Key 数据保存在配置目录下的 `subkeys.json`（与 `config.json` 同级，由网关自动维护，
   无需手工编辑）。完整密钥只在签发时显示一次，请立即保存。
-- 子 Key 与 `--token` 是**两套凭据**：`--token` 是管理密钥（进控制台、改配置），
-  子 Key 只负责对外调用。**建议始终设置 `--token`**，否则管理页面本身也无鉴权保护。
-- 命令行也可管理子 Key：
+- 用户 Key 与 `--token` 是**两套凭据**：`--token` 是管理密钥（进控制台、改配置），
+  用户 Key 只负责对外调用。**建议始终设置 `--token`**，否则管理页面本身也无鉴权保护。
+- 命令行也可管理用户 Key：
 
   ```bash
-  python -m st_rotator subkey list -c config.json      # 查看所有子 Key 及用量
+  python -m st_rotator subkey list -c config.json      # 查看所有用户 Key 及用量
   python -m st_rotator subkey create -c config.json --name 数据管道 --note "ETL 专用"
   python -m st_rotator subkey toggle -c config.json --id <ID> --disable   # 停用（立即失效）
-  python -m st_rotator subkey reset  -c config.json --id <ID>             # 清零该子 Key 用量统计
-  python -m st_rotator subkey revoke -c config.json --id <ID>             # 删除子 Key
+  python -m st_rotator subkey reset  -c config.json --id <ID>             # 清零该用户 Key 用量统计
+  python -m st_rotator subkey revoke -c config.json --id <ID>             # 删除用户 Key
   ```
 
 ## 命令行
@@ -193,7 +193,7 @@ exe 版和源码版共用同一套子命令：源码运行写 `python -m st_rota
 | `check [-c <cfg>]` | 逐把 Key 单独体检（区分"真失效"和"暂时无法确认"） |
 | `chat [-c <cfg>] [-s] <prompt>` | 发一次对话，`-s` 流式 |
 | `bench [-c <cfg>] -n N -p P` | 并发压测，验证轮换效果 |
-| `subkey <action> [-c <cfg>]` | 管理对外子 Key（list / create / toggle / reset / revoke） |
+| `subkey <action> [-c <cfg>]` | 管理用户 Key（list / create / toggle / reset / revoke） |
 | `demo` | 离线演示，不需要真实 Key |
 | `--version` / `-V` | 打印版本号（exe 版输出 `st-rotator 1.4.0`） |
 
@@ -447,10 +447,10 @@ curl -si -H "Authorization: Bearer $KEY" https://<host>/v1/models | head -30
 - `config.json` 含明文密钥，已加入 `.gitignore`，**不要提交**。推荐用 `${ENV}` 占位符写法。
 - 日志里的 Key 一律脱敏（`sk-J79...aZuN`），可以安全外发。
 - **控制台页面会明文显示 token**（复制接入片段需要），截图外发前注意避开。
-- **子 Key 不等于管理 Token。** 子 Key 只能调 API，永远打不开管理页面；管理页面与 `/api/*`
-  只认 `--token`。签发子 Key 后若仍未设 `--token`，控制台会给出醒目提示。
-- `subkeys.json` 含子 Key 明文密钥，与 `config.json` 同级存放，同样**不要提交 / 外发**；
-  删除某个子 Key 后，其历史用量明细仍保留在该文件中（用作审计）。
+- **用户 Key 不等于管理 Token。** 用户 Key 只能调 API，永远打不开管理页面；管理页面与 `/api/*`
+  只认 `--token`。签发用户 Key 后若仍未设 `--token`，控制台会给出醒目提示。
+- `subkeys.json` 含用户 Key 明文密钥，与 `config.json` 同级存放，同样**不要提交 / 外发**；
+  删除某个用户 Key 后，其历史用量明细仍保留在该文件中（用作审计）。
 - `deepseek-v4-flash` 是推理模型，`reasoning_content` 与 `content` 共用 `max_tokens` 预算，
   **建议不低于 500**，否则 `content` 会返回空串。
 
@@ -483,9 +483,9 @@ curl -si -H "Authorization: Bearer $KEY" https://<host>/v1/models | head -30
 st_rotator/
 ├── keypool.py      # ★ 核心：Key 池调度、冷却、RPM 窗口、统计
 ├── client.py       # ★ 核心：错误分类、轮换重试、流式/原始 chunk 透传
-├── proxy.py        # ★ 本地 OpenAI 兼容网关（管理 Token / 子 Key 双鉴权 + 按子 Key 记用量）
-├── ui.py           # ★ 控制台后端：状态快照、写操作、路由（含子 Key 管理接口）
-├── subkeys.py      # 对外子 Key：签发、鉴权、用量统计（subkeys.json）
+├── proxy.py        # ★ 本地 OpenAI 兼容网关（管理 Token / 用户 Key 双鉴权 + 按用户 Key 记用量）
+├── ui.py           # ★ 控制台后端：状态快照、写操作、路由（含用户 Key 管理接口）
+├── subkeys.py      # 用户 Key：签发、鉴权、用量统计（subkeys.json）
 ├── tray.py         # ★ Windows 托盘（纯 ctypes 调 Shell_NotifyIcon）
 ├── trayicons.py    # 状态图标生成（手工拼 ICO 字节，不需要 Pillow）
 ├── dashboard.py    # 控制台前端（单文件 HTML，零 CDN 依赖）

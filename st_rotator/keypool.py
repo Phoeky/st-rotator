@@ -22,7 +22,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Iterable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from .config import AccountConfig, CooldownConfig
 from .errors import AllKeysInvalid, ConfigError, NoAvailableKey
@@ -57,6 +57,36 @@ def key_id(key: str) -> str:
     相同）。要精确地"测试/删除某一把"，就需要一个既能唯一定位、又不泄漏原文的标识。
     """
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+
+
+# ---------------------------------------------------------------- 请求归属（用户）
+#
+# "谁在占用这把 Key" 是每个**请求**的信息，不属于 Key 自身状态，所以不塞进
+# ApiKey 的持久字段，而是用线程局部变量传递：网关在进入 /v1/* 处理前用
+# ``user_context(名称)`` 标注本次请求的调用方，KeyPool 在 acquire / release /
+# 上报结果时读取它，用于在控制台显示"谁在尝试"。
+#
+# 为什么用线程局部而不是显式传参：acquire/release 埋在 client 的轮换重试里，
+# 一路透传会让调度层耦合到网关层的鉴权概念；而网关是每请求一线程，
+# 线程局部正好一一对应，且流式响应也在同一线程内迭代完成。
+
+_user_local = threading.local()
+
+
+def current_user() -> str:
+    """当前线程正在处理的请求的调用方名称；未标注时返回空串。"""
+    return getattr(_user_local, "name", "") or ""
+
+
+@contextlib.contextmanager
+def user_context(name: str) -> Iterator[str]:
+    """标注当前线程的调用方名称，退出时恢复原值（支持嵌套）。"""
+    previous = current_user()
+    _user_local.name = name or ""
+    try:
+        yield name or ""
+    finally:
+        _user_local.name = previous
 
 
 @dataclass
@@ -149,6 +179,7 @@ class ApiKey:
         "key", "account", "rpm_limit", "max_concurrency", "weight", "tags",
         "status", "cooldown_until", "pending_cooldown", "consecutive_failures",
         "inflight", "last_used", "last_error", "stats", "_window", "account_state",
+        "inflight_users", "last_user",
     )
 
     def __init__(
@@ -178,6 +209,10 @@ class ApiKey:
         self.stats = KeyStats()
         self._window: deque[float] = deque()  # 最近 60s 内的发起时间
         self.account_state = account_state
+        # 在途请求各自的调用方名称（与 inflight 一一对应，空串代表未标注/管理端）
+        self.inflight_users: list[str] = []
+        # 最近一次占用这把 Key 的调用方；冷却中也能看到"是谁把它打冷却的"
+        self.last_user = ""
 
     # ------------------------------------------------------------ 内部工具
 
@@ -252,6 +287,9 @@ class ApiKey:
             "rpm_window": f"{window_len}/{rpm_limit or '-'}",
             "last_error": self.last_error,
             "stats": self.stats.to_dict(),
+            # 在途/冷却归属：前端据此在状态后追加 "(用户名)"
+            "inflight_users": list(self.inflight_users),
+            "last_user": self.last_user,
         }
 
 
@@ -476,9 +514,15 @@ class KeyPool:
         冷却若是在途期间判下的（见 :meth:`_mark_cooldown`），这里在全部归还后
         才开始起算完整冷却——在途中不计入冷却时间。
         """
+        user = current_user()
         with self._cond:
             if key.inflight > 0:
                 key.inflight -= 1
+            if user and user in key.inflight_users:
+                key.inflight_users.remove(user)
+            elif key.inflight_users:
+                # 未标注调用方（后台任务等）或已被改写：归还最老的一条，保持与 inflight 同步
+                key.inflight_users.pop(0)
             if key.status is KeyStatus.INFLIGHT:
                 key.status = KeyStatus.HEALTHY
             if key.inflight == 0:
@@ -493,6 +537,10 @@ class KeyPool:
 
     def _reserve(self, key: ApiKey, now: float) -> ApiKey:
         key.inflight += 1
+        user = current_user()
+        key.inflight_users.append(user)
+        if user:
+            key.last_user = user
         if key.status is KeyStatus.HEALTHY:
             key.status = KeyStatus.INFLIGHT  # 占用中 → "在途中"
         key.last_used = now
@@ -588,12 +636,14 @@ class KeyPool:
 
     # ------------------------------------------------------------ 结果上报
 
-    def _mark_cooldown(self, key: ApiKey, delay: float) -> None:
+    def _mark_cooldown(self, key: ApiKey, delay: float, user: str | None = None) -> None:
         """把一把 Key 标记为冷却（调用方需持锁）。
 
         在途（inflight > 0）时只挂起冷却、不起算：等 release 全部归还后再起算
         完整 delay，避免在途占用时间被算进冷却——否则并发请求一多，
         冷却时长会被在途时间悄悄抵扣，形同虚设。
+
+        ``user`` 是"谁把这块 Key 打到冷却的"；缺省取当前线程的调用方。
         """
         if key.inflight > 0:
             key.pending_cooldown = max(key.pending_cooldown, delay)
@@ -601,6 +651,9 @@ class KeyPool:
             key.cooldown_until = max(key.cooldown_until, self._clock() + delay)
             key.pending_cooldown = 0.0
         key.status = KeyStatus.COOLDOWN
+        who = current_user() if user is None else user
+        if who:
+            key.last_user = who
 
     def report_success(self, key: ApiKey, latency: float | None = None) -> None:
         with self._cond:
@@ -634,10 +687,11 @@ class KeyPool:
                 key.account_state.consecutive_failures += 1
                 key.account_state.cooldown_until = max(key.account_state.cooldown_until, self._clock() + delay)
                 key.account_state.last_error = key.last_error
+                user = current_user()
                 for sibling in self._keys:
                     if sibling.account_state is key.account_state and sibling.status is not KeyStatus.INVALID:
                         sibling.last_error = key.last_error
-                        self._mark_cooldown(sibling, delay)
+                        self._mark_cooldown(sibling, delay, user)
 
             self._cond.notify_all()
             return delay
@@ -689,10 +743,11 @@ class KeyPool:
             if key.account_state is not None:
                 key.account_state.cooldown_until = max(key.account_state.cooldown_until, self._clock() + delay)
                 key.account_state.last_error = key.last_error
+                user = current_user()
                 for sibling in self._keys:
                     if sibling.account_state is key.account_state and sibling.status is not KeyStatus.INVALID:
                         sibling.last_error = key.last_error
-                        self._mark_cooldown(sibling, delay)
+                        self._mark_cooldown(sibling, delay, user)
             self._cond.notify_all()
             return delay
 
@@ -735,7 +790,7 @@ class KeyPool:
             self._refresh(now)
             return [k.to_dict(now) for k in self._keys]
 
-    def summary(self) -> dict[str, int]:
+    def summary(self) -> dict[str, Any]:
         now = self._clock()
         with self._cond:
             self._refresh(now)
@@ -746,6 +801,10 @@ class KeyPool:
             inflight = sum(1 for k in self._keys if k.status is KeyStatus.INFLIGHT)
             cooling = sum(1 for k in self._keys if k.status is KeyStatus.COOLDOWN)
             invalid = sum(1 for k in self._keys if k.status is KeyStatus.INVALID)
+            # 正在尝试的用户数：所有在途请求的调用方并集（同一用户占多把只算一次）。
+            # 只给数量、不给名字：summary 会原样出现在无需鉴权的 /healthz 上，
+            # 具体用户名走 snapshot 里的 inflight_users（控制台接口需管理 Token）。
+            active = {u for k in self._keys for u in k.inflight_users if u}
             return {
                 "total": total,
                 "healthy": healthy,
@@ -753,4 +812,5 @@ class KeyPool:
                 "invalid": invalid,
                 "inflight": sum(k.inflight for k in self._keys),
                 "status_inflight": inflight,
+                "active_users": len(active),
             }

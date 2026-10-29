@@ -355,7 +355,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div class="card" style="margin-bottom:14px">
-    <h2>对外子 Key <span class="spacer"></span><span class="muted" id="sk-note" style="text-transform:none;letter-spacing:0"></span></h2>
+    <h2>用户 <span class="spacer"></span><span class="muted" id="sk-note" style="text-transform:none;letter-spacing:0"></span></h2>
     <div id="sk-state"></div>
     <div id="sk-create" style="display:none">
       <div class="row" style="margin-bottom:10px">
@@ -367,17 +367,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <span>备注（可选）</span>
           <input id="sk-note-input" placeholder="给谁用、什么时候发的">
         </label>
-        <button class="primary" id="btn-sk-create" style="height:33px">签发子 Key</button>
+        <button class="primary" id="btn-sk-create" style="height:33px">签发用户 Key</button>
       </div>
     </div>
     <div class="muted" style="font-size:11.5px;margin-bottom:10px;line-height:1.7">
-      子 Key 是网关签发的对外凭据：<b>只能调用 API（/v1/*）与健康检查，永远无法访问本管理页面</b>，
-      也无法查看或改动 Key 池与配置。每次调用按子 Key 独立累计输入 / 输出 token、缓存命中与成功失败，
-      可直接作为计费或审计依据。已停用的子 Key 立即失效。完整密钥只在签发时显示一次。
+      用户 Key 是网关签发的对外凭据：<b>只能调用 API（/v1/*）与健康检查，永远无法访问本管理页面</b>，
+      也无法查看或改动 Key 池与配置。每次调用按用户 Key 独立累计输入 / 输出 token、缓存命中与成功失败，
+      可直接作为计费或审计依据；Key 池里会显示每个用户当前正在占用哪把 Key。已停用的用户 Key 立即失效。
+      完整密钥只在签发时显示一次。
     </div>
     <div id="sk-table-sec"></div>
     <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
-      <h2 style="margin-bottom:10px">子 Key 用量明细 <span class="muted" style="font-size:12px">（分页显示，每页 10 条，最新在前）</span></h2>
+      <h2 style="margin-bottom:10px">用户用量明细 <span class="muted" style="font-size:12px">（分页显示，每页 10 条，最新在前）</span></h2>
       <div id="sk-history"></div>
       <div id="sk-hist-bar"></div>
     </div>
@@ -804,11 +805,23 @@ function renderPool(state) {
     var body = keys.map(function (k) {
       var st = k.stats || {};
       var statusText = { healthy: "可用", inflight: "在途中", cooldown: "冷却中", invalid: "已失效" }[k.status] || k.status;
+      // 状态后面跟"(用户名)"：在途中显示正在占用这把 Key 的调用方（并发时可能不止一个），
+      // 冷却中显示把它打进冷却的那一位。没有归属信息（后台任务、管理端旧请求）就不显示。
+      var users = (k.inflight_users || []).filter(Boolean);
+      var who = "";
+      if (users.length) {
+        var uniq = [];
+        users.forEach(function (u) { if (uniq.indexOf(u) < 0) uniq.push(u); });
+        who = uniq.join("、") + (users.length > uniq.length ? " ×" + users.length : "");
+      } else if (k.status === "cooldown" && k.last_user) {
+        who = k.last_user;
+      }
       var cooldown = k.cooldown_remaining > 0 ? k.cooldown_remaining + "s" : "—";
       return "<tr>" +
         "<td>" + esc(k.account) + "</td>" +
         '<td class="mono">' + esc(k.key) + "</td>" +
-        '<td><span class="pill ' + esc(k.status) + '">' + esc(statusText) + "</span></td>" +
+        '<td style="white-space:nowrap"><span class="pill ' + esc(k.status) + '">' + esc(statusText) + "</span>" +
+          (who ? '<span class="muted" style="font-size:11px"> (' + esc(who) + ")</span>" : "") + "</td>" +
         '<td class="num">' + esc(cooldown) + "</td>" +
         '<td class="mono">' + esc(k.rpm_window) + "</td>" +
         '<td class="num">' + fmtInt(st.successes) + " / " + fmtInt(st.failures) + "</td>" +
@@ -827,7 +840,18 @@ function renderPool(state) {
     });
   }
   var s = state.summary || {};
-  $("pool-note").textContent = s.total ? ("在途 " + s.inflight + " / 共 " + s.total + " 把") : "";
+  // 右上角「正在尝试用户」：取所有在途请求的调用方并集（同一用户占多把只列一次）
+  var activeNames = [];
+  keys.forEach(function (k) {
+    (k.inflight_users || []).forEach(function (u) {
+      if (u && activeNames.indexOf(u) < 0) activeNames.push(u);
+    });
+  });
+  var noteText = s.total ? ("在途 " + s.inflight + " / 共 " + s.total + " 把") : "";
+  if (activeNames.length) {
+    noteText += (noteText ? " · " : "") + "正在尝试：" + activeNames.join("、");
+  }
+  $("pool-note").textContent = noteText;
 }
 
 function renderOptions(state) {
@@ -1077,7 +1101,7 @@ function copyText(text, label) {
   area.remove();
 }
 
-/* ------------------------------------------------------------------ 子 Key */
+/* ------------------------------------------------------------------ 用户 */
 
 var skRevealed = {};
 
@@ -1102,7 +1126,7 @@ function renderSubkeys(state) {
     note.textContent = "";
     createBox.style.display = "none";
     stateBox.innerHTML = "";
-    tableBox.innerHTML = '<div class="empty">子 Key 未启用（当前进程未挂载 subkeys 管理器，可能是旧版本或直接调用代理）。</div>';
+    tableBox.innerHTML = '<div class="empty">用户功能未启用（当前进程未挂载 subkeys 管理器，可能是旧版本或直接调用代理）。</div>';
     histBar.innerHTML = "";
     historyBox.innerHTML = "";
     return;
@@ -1111,7 +1135,7 @@ function renderSubkeys(state) {
   var warns = [];
   if (!sk.admin_token_set) {
     warns.push("未设置管理 Token（--token）：本管理页面与 /api/* 接口当前无需凭据即可访问。" +
-      "启用子 Key 后请务必设置管理 Token，否则任何知道地址的人都能绕过子 Key 直接调 API 或改配置。");
+      "启用用户功能后请务必设置管理 Token，否则任何知道地址的人都能绕过用户 Key 直接调 API 或改配置。");
   }
   stateBox.innerHTML = warns.map(function (w) {
     return '<div class="notice">' + esc(w) + "</div>";
@@ -1119,7 +1143,7 @@ function renderSubkeys(state) {
   var keys = sk.keys || [];
   note.textContent = keys.length + " 个 · " + keys.filter(function (k) { return k.enabled; }).length + " 启用";
   if (!keys.length) {
-    tableBox.innerHTML = '<div class="empty">还没有子 Key。填好名称点「签发子 Key」即可生成一把对外凭据。</div>';
+    tableBox.innerHTML = '<div class="empty">还没有用户。填好名称点「签发用户 Key」即可生成一把对外凭据。</div>';
   } else {
     var head = "<tr><th>名称</th><th>Key</th><th>状态</th><th>创建时间</th>" +
       "<th class='num'>请求</th><th class='num'>成功</th><th class='num'>失败</th>" +
@@ -1206,10 +1230,10 @@ function renderSubkeyHistory(data, bar, box) {
   if (next) next.onclick = function () { loadSubkeyHistory(skHist.page + 1); };
   if (!history.length) {
     box.innerHTML = '<div class="empty">' +
-      (data.total ? "本页暂无记录。" : "暂无调用记录（子 Key 尚未被使用）。") + "</div>";
+      (data.total ? "本页暂无记录。" : "暂无调用记录（用户 Key 尚未被使用）。") + "</div>";
     return;
   }
-  var hhead = "<tr><th>时间</th><th>子 Key</th><th>模型</th><th>模式</th><th>结果</th>" +
+  var hhead = "<tr><th>时间</th><th>用户</th><th>模型</th><th>模式</th><th>结果</th>" +
     "<th class='num'>输入</th><th class='num'>输出</th><th class='num'>缓存命中率</th><th class='num'>延迟</th></tr>";
   var hbody = history.map(function (h) {
     var mode = h.stream ? "流式" : "普通";
@@ -1247,7 +1271,7 @@ async function postSubkey(path, body, button) {
 
 async function onSubkeyCreate() {
   var name = $("sk-name").value.trim();
-  if (!name) { toast("请先填子 Key 名称", "err"); return; }
+  if (!name) { toast("请先填用户名称", "err"); return; }
   var button = $("btn-sk-create");
   button.disabled = true;
   var original = button.textContent;
@@ -1260,7 +1284,7 @@ async function onSubkeyCreate() {
     toast(result.message || "已创建", "ok");
     $("sk-name").value = "";
     $("sk-note-input").value = "";
-    if (result.key) copyText(result.key, "子 Key（完整密钥只显示这一次）");
+    if (result.key) copyText(result.key, "用户 Key（完整密钥只显示这一次）");
     await refreshState();
   } catch (err) { toast(err.message, "err"); }
   finally { button.disabled = false; button.textContent = original; }
@@ -1282,12 +1306,12 @@ async function onSubkeyAction(action, button) {
     return;
   }
   if (action === "reset") {
-    if (!confirm("确定清零子 Key「" + name + "」的用量统计吗？")) return;
+    if (!confirm("确定清零用户「" + name + "」的用量统计吗？")) return;
     await postSubkey("/api/subkeys/reset", { id: id }, button);
     return;
   }
   if (action === "revoke") {
-    if (!confirm("确定删除子 Key「" + name + "」吗？该 Key 立即失效，历史用量明细仍然保留。")) return;
+    if (!confirm("确定删除用户「" + name + "」吗？该 Key 立即失效，历史用量明细仍然保留。")) return;
     await postSubkey("/api/subkeys/revoke", { id: id }, button);
     return;
   }
@@ -1299,7 +1323,7 @@ async function onSubkeyAction(action, button) {
   if (action === "copy") {
     var sk = lastState.subkeys || {};
     var found = (sk.keys || []).filter(function (k) { return k.id === id; })[0];
-    copyText(found ? found.key : "", "子 Key");
+    copyText(found ? found.key : "", "用户 Key");
     return;
   }
 }

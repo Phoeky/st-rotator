@@ -7,7 +7,7 @@
     python -m st_rotator chat  -c config.json "你好"
     python -m st_rotator serve -c config.json        # 只起网关，无界面
     python -m st_rotator bench -c config.json -n 200 -p 16
-    python -m st_rotator subkey list -c config.json  # 查看/签发对外子 Key
+    python -m st_rotator subkey list -c config.json  # 查看/签发对外用户 Key
 """
 
 from __future__ import annotations
@@ -407,9 +407,9 @@ def _fmt_epoch(value: Any) -> str:
 
 
 def cmd_subkey(args: argparse.Namespace) -> int:
-    """管理对外子 Key：签发、查看用量、停用 / 启用、删除、清零统计。
+    """管理对外用户 Key：签发、查看用量、停用 / 启用、删除、清零统计。
 
-    子 Key 数据保存在配置目录下的 ``subkeys.json``，独立于 config.json 与管理 Token。
+    用户 Key 数据保存在配置目录下的 ``subkeys.json``，独立于 config.json 与管理 Token。
     """
     from .subkeys import SubKeyManager
 
@@ -438,36 +438,36 @@ def cmd_subkey(args: argparse.Namespace) -> int:
                 ("requests", "请求"), ("ok/fail", "成功/失败"), ("in/out", "输入/输出"),
                 ("cached", "缓存命中"), ("last", "最近使用"),
             ])
-            print(f"\n共 {len(keys)} 个子 Key")
+            print(f"\n共 {len(keys)} 个用户 Key")
             return 0
 
         if args.action == "create":
             if not (args.name or "").strip():
-                print("create 需要 --name 指定子 Key 名称", file=sys.stderr)
+                print("create 需要 --name 指定用户 Key 名称", file=sys.stderr)
                 return 2
             sub = manager.create(args.name, note=args.note or "")
-            print(f"已创建子 Key：{sub.name}（{sub.masked}）")
+            print(f"已创建用户 Key：{sub.name}（{sub.masked}）")
             print(f"  key: {sub.key}")
-            print("  （完整密钥只显示这一次，请立即保存；子 Key 只能调 API，不能访问控制台）")
+            print("  （完整密钥只显示这一次，请立即保存；用户 Key 只能调 API，不能访问控制台）")
             manager.save()
             return 0
 
         if not args.id:
-            print(f"{args.action} 需要 --id（子 Key 标识，list 可查看）", file=sys.stderr)
+            print(f"{args.action} 需要 --id（用户 Key 标识，list 可查看）", file=sys.stderr)
             return 2
 
         if args.action == "revoke":
             sub = manager.revoke(args.id)
-            print(f"已删除子 Key：{sub.name}（{sub.masked}），该 Key 立即失效")
+            print(f"已删除用户 Key：{sub.name}（{sub.masked}），该 Key 立即失效")
         elif args.action == "toggle":
             if args.enabled is None:
                 print("toggle 需要 --enabled 或 --disable", file=sys.stderr)
                 return 2
             sub = manager.set_enabled(args.id, args.enabled)
-            print(f"已{'启用' if sub.enabled else '停用'}子 Key：{sub.name}（{sub.masked}）")
+            print(f"已{'启用' if sub.enabled else '停用'}用户 Key：{sub.name}（{sub.masked}）")
         elif args.action == "reset":
             sub = manager.reset_usage(args.id)
-            print(f"已清零子 Key {sub.name} 的用量统计")
+            print(f"已清零用户 Key {sub.name} 的用量统计")
         else:  # pragma: no cover - argparse choices 已约束
             print(f"未知操作：{args.action}", file=sys.stderr)
             return 2
@@ -763,7 +763,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_subkey = sub.add_parser(
         "subkey",
-        help="管理对外子 Key（签发 / 查看 / 停用 / 删除 / 清零用量）",
+        help="管理对外用户 Key（签发 / 查看 / 停用 / 删除 / 清零用量）",
     )
     add_config(p_subkey)
     p_subkey.add_argument(
@@ -771,7 +771,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["list", "create", "revoke", "toggle", "reset"],
         help="要执行的操作",
     )
-    p_subkey.add_argument("--id", help="子 Key 标识（key_id / 名称），list 可查看")
+    p_subkey.add_argument("--id", help="用户 Key 标识（key_id / 名称），list 可查看")
     p_subkey.add_argument("--name", help="create 时指定的名称")
     p_subkey.add_argument("--note", help="备注说明")
     p_subkey.add_argument("--enabled", action="store_true", default=None, help="toggle 时置为启用")
