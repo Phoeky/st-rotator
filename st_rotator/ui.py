@@ -667,10 +667,12 @@ class ConsoleState:
             return UiResponse.error(f"拉取模型清单失败：{exc}", status=502)
         if catalog.get("error") and not catalog.get("models"):
             return UiResponse.error(f"拉取模型清单失败：{catalog['error']}", status=502)
+        # 计数按「放行 + 被白名单拦截」= 完整上游清单，避免白名单生效时只报放行数。
+        total = len(catalog.get("models", [])) + len(catalog.get("blocked", []))
         return UiResponse.json({
             "ok": True,
-            "count": len(catalog.get("models", [])),
-            "message": f"已拉取 {len(catalog.get('models', []))} 个模型",
+            "count": total,
+            "message": f"已拉取 {total} 个模型",
         })
 
     # ------------------------------------------------------------ 内部

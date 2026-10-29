@@ -741,8 +741,14 @@ function renderModels(state) {
   select.dataset.current = current || "";
 
   // 可用模型：下拉多选。勾选状态保存在 availSelected（周期刷新不打断用户操作）；
+  // 下拉可选项必须是「完整上游清单」，不能只用 S.models——后端返回的 models 已按
+  // 白名单过滤过，只用它会导致保存白名单后，未选中的模型从下拉里消失、想再勾选
+  // 也无从下手。catalog.blocked 就是本次被白名单拦下的模型名，并回来即完整清单。
   // 已保存白名单里不在最新清单的模型保留为历史项，方便取消勾选。
   availIds = S.models.map(function (m) { return m.id; });
+  (catalog.blocked || []).forEach(function (id) {
+    if (availIds.indexOf(id) === -1) availIds.push(id);
+  });
   (state.available_models || []).forEach(function (id) {
     if (availIds.indexOf(id) === -1) availIds.push(id);
   });
@@ -760,7 +766,9 @@ function renderModels(state) {
     count.textContent = "暂无清单，点「刷新清单」从上游拉取。";
   } else {
     var blocked = catalog.blocked || [];
-    var parts = ["共 " + S.models.length + " 个模型" + (catalog.cached ? "（缓存）" : "（刚拉取）")];
+    // 条数用「白名单内 + 被拦截」= 完整上游清单，否则白名单生效时这里只报放行数，
+    // 与下方下拉的「共 N 个模型」对不上。
+    var parts = ["共 " + (S.models.length + blocked.length) + " 个模型" + (catalog.cached ? "（缓存）" : "（刚拉取）")];
     if (catalog.restricted) {
       parts.push("已启用可用模型白名单，拦截 " + blocked.length + " 个不可用模型"
         + (blocked.length ? "：" + blocked.join("、") : ""));
