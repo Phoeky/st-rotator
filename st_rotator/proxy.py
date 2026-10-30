@@ -70,6 +70,72 @@ def _passthrough_error(status: int, body: str) -> dict:
     return error_payload(body[:800] or f"upstream returned {status}", code=str(status))
 
 
+# ------------------------------------------------------------ 请求体清洗
+#
+# 为什么需要它：商汤网关对 chat/completions 的 schema 校验比 OpenAI 官方严，
+# 有一类"完全合法、官方也接受"的写法会被它判成 400：
+#
+#     {"role": "assistant", "content": null, "tool_calls": [...]}   ← 合法
+#     {"role": "assistant", "content": null}                        ← 400
+#     {"role": "assistant"}                        （连字段都没有）  ← 400
+#     {"role": "system",    "content": null}                        ← 400
+#
+# 上述写法是 Agent 框架表达"这一轮只有工具调用、没有文本"的常规手段（OpenAI 与
+# DeepSeek 直连都接受）。商汤在**没有 tool_calls 兜底**时直接回：
+#
+#     400 {"message":"inference request is invalid",
+#          "type":"invalid_request_error","code":"invalid_parameter_error"}
+#
+# 实测（2026-10-30，deepseek-v4-flash）：把这类 content 规范成空串 "" 之后全部 200；
+# 而带 tool_calls 的 assistant 保持 null 不变也照样 200（不动它，避免影响工具轮次）。
+# 注意 user.content 为 null/"" 会另报 "user content required"，那是真的空用户轮，
+# 不在这里"修复"（伪造成空串只会把错误往后推）。
+#
+# 另外两个商汤明确不认的字段（实测 400）也顺手摘掉：
+#   logprobs            → 400 inference request is invalid
+#   metadata            → 400 invalid arguments
+_SENSENOVA_UNSUPPORTED_FIELDS = ("logprobs", "top_logprobs", "metadata")
+
+
+def sanitize_messages(messages: Any) -> Any:
+    """把会让商汤网关误判 400 的消息写法规范成语义等价的安全写法。
+
+    规则（只改"缺 content / content 为 null 的 assistant|system 消息"，且该消息
+    没有 ``tool_calls`` —— 带 ``tool_calls`` 时商汤接受 ``content: null``，保持原样）：
+    统一补成空串 ``""``。非 list 输入原样返回。
+    """
+    if not isinstance(messages, list):
+        return messages
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") not in ("assistant", "system"):
+            continue
+        if message.get("tool_calls"):
+            continue
+        if "content" not in message or message.get("content") is None:
+            fixed = dict(message)
+            fixed["content"] = ""
+            messages[index] = fixed
+    return messages
+
+
+def sanitize_params(params: dict[str, Any]) -> dict[str, Any]:
+    """摘掉商汤网关明确拒收的顶层字段（实测 logprobs / metadata 都会 400）。"""
+    for field in _SENSENOVA_UNSUPPORTED_FIELDS:
+        params.pop(field, None)
+    return params
+
+
+def sanitize_chat_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """对一整份 chat 请求体做清洗（供原样透传端点与测试使用）。"""
+    if not isinstance(payload, dict):
+        return payload
+    sanitize_messages(payload.get("messages"))
+    sanitize_params(payload)
+    return payload
+
+
 def _extract_usage(result: Any) -> tuple[int, int, int] | None:
     """从上游响应中提取 (输入 token, 输出 token, 缓存命中 token)；取不到返回 None。"""
     if not isinstance(result, dict):
@@ -493,6 +559,13 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             self._send_json(400, error_payload("'messages' is required", "invalid_request_error"))
             return
 
+        # 商汤网关的 schema 比 OpenAI 官方严：Agent 常发的
+        # `{"role":"assistant","content":null}`（无 tool_calls）会被判 400
+        # "inference request is invalid"。这里在转发前做语义等价的规范化，
+        # 让所有接入的 Agent 自动免疫这类 400（详见模块顶部注释）。
+        messages = sanitize_messages(messages)
+        sanitize_params(params)
+
         # 路由层真实拦截：模型不在可用白名单里就直接 400，不转发给上游
         # （model_block_reason 内部会回落到默认模型再判断）。
         blocked = self.rotator.model_block_reason(model)
@@ -642,6 +715,10 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
                 self._send_json(400, error_payload(f"invalid JSON body: {exc}", "invalid_request_error"))
                 return
         headers = self._forwardable_headers()
+        # 透传端点（/v1/responses、/v1/embeddings…）也做同一套清洗：
+        # 商汤对 messages 的严格校验与端点无关，漏掉这里会让 Agent 换个入口再撞 400。
+        if isinstance(body, dict):
+            sanitize_chat_payload(body)
         # 路由层真实拦截：透传端点只要显式点名了模型，就按可用白名单拦一遍，
         # 名单外的模型直接 400，不消耗上游额度（见 model_filter.available 配置）。
         if record_usage and isinstance(body, dict) and body.get("model") is not None:

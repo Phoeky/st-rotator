@@ -11,9 +11,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#)
-[![Release](https://img.shields.io/badge/release-v1.7.0-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v1.7.0)
+[![Release](https://img.shields.io/badge/release-v2.0.0-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v2.0.0)
 
-> 📦 **Windows 用户**：[下载 `st-rotator-1.7.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v1.7.0/st-rotator-1.7.0-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
+> 📦 **Windows 用户**：[下载 `st-rotator-2.0.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v2.0.0/st-rotator-2.0.0-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
 
 ![控制台](docs/console.png)
 
@@ -58,11 +58,11 @@
 
 ### Windows 免安装（推荐）
 
-从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v1.7.0) 下载 **[`st-rotator-1.7.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v1.7.0/st-rotator-1.7.0-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
+从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v2.0.0) 下载 **[`st-rotator-2.0.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v2.0.0/st-rotator-2.0.0-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
 
 | 文件 | 用途 |
 |---|---|
-| `st-rotator-1.7.0-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
+| `st-rotator-2.0.0-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
 
 > ⚠️ **不要解压到 `C:\Program Files`**：程序运行时会往 **exe 同目录**写 `config.json`、`rotator.log`、`subkeys.json`、`.tray-token`、`.tray-icons/`，放到无写权限的目录会失败。
 
@@ -449,6 +449,93 @@ curl -si -H "Authorization: Bearer $KEY" https://<host>/v1/models | head -30
 > 那些白打的 429 不再发生，客户端等待时间大幅下降。
 > 注意这**不提升峰值吞吐** —— 峰值由上游额度决定，任何客户端参数都突破不了。
 
+## 常见问题排查
+
+### 400 `inference request is invalid`（`code: "3"` / `invalid_parameter_error`）
+
+**症状**：Agent 通过网关发请求，上游返回
+
+```json
+{"error": {"message": "inference request is invalid",
+           "type": "invalid_request_error",
+           "code": "invalid_parameter_error"}}
+```
+
+有时 `code` 是 `"3"`、message 换成 `invalid arguments` 或 `user content required`。
+
+**先说结论**：**这不是 st-rotator 造成的，是商汤网关对请求体本身的严格校验。**
+把同一份请求体**直连**上游，会得到**一模一样**的 400；网关只是如实透传。
+实测对比（2026-10-30，`deepseek-v4-flash`）：
+
+```
+直连上游  HTTP 400 | ('inference request is invalid', 'invalid_request_error', 'invalid_parameter_error')
+经网关    HTTP 400 | ('inference request is invalid', 'invalid_request_error', 'invalid_parameter_error')
+状态码一致: True      错误三元组一致: True
+```
+
+**根因**：Agent 框架（Claude Code / Codex / WorkBuddy 等）用
+`{"role": "assistant", "content": null}` 表示"这一轮没有文本、只有工具调用"，
+OpenAI 与 DeepSeek 直连都接受，但商汤的 schema 更严：
+
+| 请求体写法 | 商汤 `deepseek-v4-flash` | 说明 |
+|---|---|---|
+| `{"role":"assistant","content":null,"tool_calls":[…]}` | ✅ 200 | 带工具调用时 `null` 合法 |
+| `{"role":"assistant","content":null}`（**无** tool_calls） | ❌ 400 | **最常见的坑** |
+| `{"role":"assistant"}`（连 `content` 字段都没有） | ❌ 400 | |
+| `{"role":"system","content":null}` | ❌ 400 | |
+| 历史里**任意一条** assistant 中招 | ❌ 400 | 与位置无关 |
+| `{"role":"user","content":null}` 或 `""` | ❌ 400 `user content required` | 真的空用户轮，不代为"修复" |
+| `logprobs` / `top_logprobs` / `metadata` | ❌ 400 | 商汤不支持这些顶层字段 |
+| `temperature` 越界（如 `3`） | ❌ 400 `should be in [0.0, 2.0)` | 校验很直白 |
+
+> ⚠️ 网上有资料说商汤还拒收 `response_format`、`thinking`、`tool_choice: "auto"`、
+> 多条 `system` 消息、`tools[*].function.strict: null` —— 那套结论针对的是
+> **`sensenova-6.7-flash-lite`** 等模型。在 **`deepseek-v4-flash`** 上实测这些字段
+> **全部 200**，不要照搬那套清洗规则。
+
+**v2.0.0 的修复**：网关在转发前做**语义等价**的规范化（`st_rotator/proxy.py` 的
+`sanitize_messages()` / `sanitize_params()`），所有接入的 Agent 自动免疫，无需逐个改客户端：
+
+* 没有 `tool_calls` 的 `assistant` / `system` 消息，`content` 为 `null` 或缺失 → 统一补成 `""`；
+* 带 `tool_calls` 的 `assistant` **保持 `null` 不动**（商汤接受，改动反而有风险）；
+* 摘掉 `logprobs` / `top_logprobs` / `metadata`；
+* `user` 的 `null`/空串**不代改** —— 那确实是非法请求，伪造成空串只会把错误往后推。
+
+修复前后实测（同一批用例，直连真实上游）：
+
+| 形态 | 修复前 | 修复后 |
+|---|---|---|
+| `assistant.content: null`（无 tool_calls） | 400 | **200** ✅ |
+| `assistant` 缺 `content` 字段 | 400 | **200** ✅ |
+| `system.content: null` | 400 | **200** ✅ |
+| 多轮历史中间的 `content: null` | 400 | **200** ✅ |
+| `assistant.content: null` + `tool_calls` | 200 | 200（保持不动）✅ |
+
+**自己排查时怎么确认**：把网关日志里的原始请求体复制出来，用同一个 Key
+**直连**打一次 —— 能复现就说明与网关无关，是请求体某处不合商汤的 schema。
+最小复现用例：
+
+```bash
+curl https://token.sensenova.cn/v1/chat/completions \
+  -H "Authorization: Bearer $SENSENOVA_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-flash","messages":[
+        {"role":"user","content":"hi"},
+        {"role":"assistant","content":null}]}'
+```
+
+### 429 `inference exceeds tpm/rpm limit`
+
+商汤的 429 是**租户级共享滑动窗口**，换 Key、换模型都解不开（详见
+[限流口径实测](#限流口径实测)）。网关内部会轮换 Key 并按其恢复窗口冷却，
+冷却期间请求在池里排队等释放——所以"变慢"通常是在等窗口恢复，不是卡死。
+按实测额度配好 `rpm_limit` 与 `rate_control`，比事后重试更有效。
+
+### `content` 返回空串
+
+`deepseek-v4-flash` 是推理模型，`reasoning_content` 与 `content` **共用
+`max_tokens` 预算**：预算被思考过程吃光时 `content` 就是空的（`finish_reason: "length"`）。
+把 `max_tokens` 调到 **500 以上**；网关检测到这种空回复时也会打一条警告日志。
+
 ## 注意事项
 
 - **默认只监听 `127.0.0.1`。** 改成 `0.0.0.0` 等于同网段任何人都能用你的凭据，
@@ -524,7 +611,13 @@ packaging/          # 打包（单 exe：build.py 构建脚本、entry.py 入口
 
 ## 历史版本
 
-- **v1.7.0（当前）**：控制台新增**指数/固定退避**切换（固定模式默认 1s 可调）；
+- **v2.0.0（当前）**：**修复 Agent 接入必现的 400 `inference request is invalid`。**
+  根因是商汤网关的 schema 比 OpenAI 官方严：Agent 表达"这一轮只有工具调用"的
+  `{"role":"assistant","content":null}`（无 `tool_calls`）会被判 400，直连同样复现。
+  网关现在在转发前做**语义等价规范化**（`null`/缺失的 `assistant`·`system` `content`
+  → `""`，带 `tool_calls` 的保持不动，摘掉 `logprobs`/`metadata`），
+  所有接入的 Agent 自动免疫。详见[常见问题排查](#400-inference-request-is-invalidcode-3--invalid_parameter_error)。
+- **v1.7.0**：控制台新增**指数/固定退避**切换（固定模式默认 1s 可调）；
   冷却序列改为 **30s → 60s → 90s** 递增；「对外子 Key」栏目更名**用户**，
   Key 池状态显示归属用户、右上角汇总「正在尝试」的用户名。
 - **v1.6.1**：可用模型改为**下拉多选**（可搜索、全选/清空、勾选不被打断）。
