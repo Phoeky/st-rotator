@@ -129,6 +129,53 @@ def normalize_content(messages):
 - `st_rotator/proxy.py` `_forward_simple()`：POST 透传端点同样处理
 - 需要新增一个 `sanitize_messages()` 工具函数 + 单元测试
 
+---
+
+# 第二轮排查（v2.0.1）：`code: "3"` 的残余 400
+
+v2.0.0 上线后用户反馈**仍然 400**，但 `code` 变成了 `"3"`（v2.0.0 修掉的那类是
+`invalid_parameter_error`）。说明是**另一批触发点**。补测 20 组写法后确认：
+
+## 新增的 400 触发点（逐条对真实上游验证）
+
+| 请求体片段 | 上游返回 | 是否已修 |
+|---|---|---|
+| `{"role":"developer","content":"…"}` | 400 `inference request is invalid` | ✅ 映射成 `system` |
+| `{"role":"tool","content":null}` / 缺 `content` | 400 `inference request is invalid` | ✅ 补 `""` |
+| `tool_calls[*].function.arguments` 传**对象** | 400 `invalid arguments` (`code:"3"`) | ✅ 序列化成字符串 |
+| `content` 传数字（`123`） | 400 `invalid arguments` | ✅ 转字符串 |
+| `temperature` 传字符串（`"0.7"`） | 400 `invalid arguments` | ✅ 转数字 |
+| `frequency_penalty` 越界（`5`） | 400 `should be in [-2, 2]` | ❌ 故意不改（用户意图问题） |
+| `temperature` 越界（`3`） | 400 `should be in [0.0, 2.0)` | ❌ 故意不改 |
+| `{"role":"user","content":null}` | 400 `user content required` | ❌ 故意不改（真的是空用户轮） |
+
+**最可能的残余原因：`role: "developer"`。** 它是 OpenAI 新规范里替代 `system` 的角色，
+Codex 等较新的 Agent 框架会大量使用；商汤只认 `system`。
+实测 `developer` → 400，同一份内容改成 `system` → 200。
+
+## v2.0.1 的完整清洗规则
+
+```python
+_ROLE_ALIASES = {"developer": "system"}
+
+def sanitize_messages(messages):
+    for m in messages:
+        # 1) 角色名映射：developer -> system
+        # 2) content 缺失/null 的 assistant|system|tool -> ""
+        #    （带 tool_calls 的 assistant 保持 null 不动）
+        # 3) tool_calls[*].function.arguments 传对象 -> json.dumps 成字符串
+        # 4) content 传数字/布尔 -> str()
+
+def sanitize_params(params):
+    # 摘掉 logprobs / top_logprobs / metadata
+    # temperature / top_p / frequency_penalty / presence_penalty 传字符串 -> float()
+```
+
+## 真正安全的做法：直接抓线上请求体
+
+本轮排查最大的教训是**靠猜字段效率太低**。更快的路径是让网关记录"上游返回 400 时
+的原始请求体"，直接看到 Agent 到底发了什么。建议后续加一个可选的 debug 开关。
+
 ## 附：本次排查用到的服务器命令
 
 ```bash

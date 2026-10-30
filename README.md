@@ -11,9 +11,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#)
-[![Release](https://img.shields.io/badge/release-v2.0.0-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v2.0.0)
+[![Release](https://img.shields.io/badge/release-v2.0.1-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v2.0.1)
 
-> 📦 **Windows 用户**：[下载 `st-rotator-2.0.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v2.0.0/st-rotator-2.0.0-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
+> 📦 **Windows 用户**：[下载 `st-rotator-2.0.1-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v2.0.1/st-rotator-2.0.1-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
 
 ![控制台](docs/console.png)
 
@@ -58,11 +58,11 @@
 
 ### Windows 免安装（推荐）
 
-从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v2.0.0) 下载 **[`st-rotator-2.0.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v2.0.0/st-rotator-2.0.0-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
+从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v2.0.1) 下载 **[`st-rotator-2.0.1-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v2.0.1/st-rotator-2.0.1-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
 
 | 文件 | 用途 |
 |---|---|
-| `st-rotator-2.0.0-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
+| `st-rotator-2.0.1-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
 
 > ⚠️ **不要解压到 `C:\Program Files`**：程序运行时会往 **exe 同目录**写 `config.json`、`rotator.log`、`subkeys.json`、`.tray-token`、`.tray-icons/`，放到无写权限的目录会失败。
 
@@ -479,37 +479,57 @@ OpenAI 与 DeepSeek 直连都接受，但商汤的 schema 更严：
 
 | 请求体写法 | 商汤 `deepseek-v4-flash` | 说明 |
 |---|---|---|
+| `{"role":"developer","content":"…"}` | ❌ 400 | **Codex 等新框架常用**，商汤只认 `system` |
 | `{"role":"assistant","content":null,"tool_calls":[…]}` | ✅ 200 | 带工具调用时 `null` 合法 |
 | `{"role":"assistant","content":null}`（**无** tool_calls） | ❌ 400 | **最常见的坑** |
 | `{"role":"assistant"}`（连 `content` 字段都没有） | ❌ 400 | |
 | `{"role":"system","content":null}` | ❌ 400 | |
-| 历史里**任意一条** assistant 中招 | ❌ 400 | 与位置无关 |
-| `{"role":"user","content":null}` 或 `""` | ❌ 400 `user content required` | 真的空用户轮，不代为"修复" |
+| `{"role":"tool","content":null}`／缺 `content` | ❌ 400 | **工具结果为空时很常见** |
+| 历史里**任意一条**中招 | ❌ 400 | 与位置无关 |
+| `tool_calls[*].function.arguments` 传**对象**（非 JSON 字符串） | ❌ 400 `invalid arguments` | OpenAI 规范要求字符串 |
+| `content` 传数字（如 `123`） | ❌ 400 `invalid arguments` | 必须是字符串或数组 |
+| `temperature` 传字符串（如 `"0.7"`） | ❌ 400 `invalid arguments` | 必须是数字 |
 | `logprobs` / `top_logprobs` / `metadata` | ❌ 400 | 商汤不支持这些顶层字段 |
-| `temperature` 越界（如 `3`） | ❌ 400 `should be in [0.0, 2.0)` | 校验很直白 |
+| `{"role":"user","content":null}` 或 `""` | ❌ 400 `user content required` | 真的空用户轮，不代为"修复" |
+| `temperature` 越界（如 `3`） | ❌ 400 `should be in [0.0, 2.0)` | 数值越界，不代为"修复" |
+| `frequency_penalty` 越界（如 `5`） | ❌ 400 `should be in [-2, 2]` | 同上 |
 
 > ⚠️ 网上有资料说商汤还拒收 `response_format`、`thinking`、`tool_choice: "auto"`、
 > 多条 `system` 消息、`tools[*].function.strict: null` —— 那套结论针对的是
 > **`sensenova-6.7-flash-lite`** 等模型。在 **`deepseek-v4-flash`** 上实测这些字段
 > **全部 200**，不要照搬那套清洗规则。
 
-**v2.0.0 的修复**：网关在转发前做**语义等价**的规范化（`st_rotator/proxy.py` 的
-`sanitize_messages()` / `sanitize_params()`），所有接入的 Agent 自动免疫，无需逐个改客户端：
+**网关侧修复（v2.0.0 起）**：网关在转发前做**语义等价**的规范化
+（`st_rotator/proxy.py` 的 `sanitize_messages()` / `sanitize_params()`），
+所有接入的 Agent 自动免疫，无需逐个改客户端：
 
-* 没有 `tool_calls` 的 `assistant` / `system` 消息，`content` 为 `null` 或缺失 → 统一补成 `""`；
+* `developer` 等未知角色 → 映射成等价的 `system`；
+* `assistant` / `system` / `tool` 消息的 `content` 为 `null` 或缺失 → 补成 `""`；
 * 带 `tool_calls` 的 `assistant` **保持 `null` 不动**（商汤接受，改动反而有风险）；
-* 摘掉 `logprobs` / `top_logprobs` / `metadata`；
-* `user` 的 `null`/空串**不代改** —— 那确实是非法请求，伪造成空串只会把错误往后推。
+* `tool_calls[*].function.arguments` 传了对象 → 序列化成 JSON 字符串；
+* `content` 传了数字/布尔 → 转成字符串；
+* `temperature` / `top_p` / `frequency_penalty` / `presence_penalty` 传了字符串 → 转成数字；
+* 摘掉 `logprobs` / `top_logprobs` / `metadata`。
 
-修复前后实测（同一批用例，直连真实上游）：
+**刻意不代改**的三类（改了就是把错误往后推，甚至篡改用户意图）：
+`user.content` 为 `null`/空串（确实是非法请求）、数值**越界**（`temperature=3`、
+`frequency_penalty=5`，上游报错信息已很明确）、`developer` 之外的其他未知 role。
+
+修复前后实测（逐例直连真实上游，2026-10-30）：
 
 | 形态 | 修复前 | 修复后 |
 |---|---|---|
+| `role: "developer"` | 400 | **200** ✅ |
 | `assistant.content: null`（无 tool_calls） | 400 | **200** ✅ |
 | `assistant` 缺 `content` 字段 | 400 | **200** ✅ |
 | `system.content: null` | 400 | **200** ✅ |
+| `tool.content: null` / 缺 `content` | 400 | **200** ✅ |
 | 多轮历史中间的 `content: null` | 400 | **200** ✅ |
+| `arguments` 传对象 | 400 | **200** ✅ |
+| `content` 传数字 | 400 | **200** ✅ |
+| `temperature` 传字符串 | 400 | **200** ✅ |
 | `assistant.content: null` + `tool_calls` | 200 | 200（保持不动）✅ |
+| 多模态 `content` 数组 | 200 | 200（保持不动）✅ |
 
 **自己排查时怎么确认**：把网关日志里的原始请求体复制出来，用同一个 Key
 **直连**打一次 —— 能复现就说明与网关无关，是请求体某处不合商汤的 schema。
@@ -611,12 +631,18 @@ packaging/          # 打包（单 exe：build.py 构建脚本、entry.py 入口
 
 ## 历史版本
 
-- **v2.0.0（当前）**：**修复 Agent 接入必现的 400 `inference request is invalid`。**
+- **v2.0.1（当前）**：**补齐 400 的清洗规则。** v2.0.0 只处理了 `content: null`，
+  实测仍有一批写法会 400，本版全部覆盖：`role: "developer"`（Codex 等新框架常用）
+  → 映射成 `system`、`tool` 消息的 `content: null`、`tool_calls[*].function.arguments`
+  传对象（序列化成 JSON 字符串）、`content` 传数字（转字符串）、
+  `temperature` 等数值参数传字符串（转数字）。详见
+  [常见问题排查](#400-inference-request-is-invalidcode-3--invalid_parameter_error)。
+- **v2.0.0**：**修复 Agent 接入必现的 400 `inference request is invalid`。**
   根因是商汤网关的 schema 比 OpenAI 官方严：Agent 表达"这一轮只有工具调用"的
   `{"role":"assistant","content":null}`（无 `tool_calls`）会被判 400，直连同样复现。
-  网关现在在转发前做**语义等价规范化**（`null`/缺失的 `assistant`·`system` `content`
+  网关在转发前做**语义等价规范化**（`null`/缺失的 `assistant`·`system` `content`
   → `""`，带 `tool_calls` 的保持不动，摘掉 `logprobs`/`metadata`），
-  所有接入的 Agent 自动免疫。详见[常见问题排查](#400-inference-request-is-invalidcode-3--invalid_parameter_error)。
+  所有接入的 Agent 自动免疫。
 - **v1.7.0**：控制台新增**指数/固定退避**切换（固定模式默认 1s 可调）；
   冷却序列改为 **30s → 60s → 90s** 递增；「对外子 Key」栏目更名**用户**，
   Key 池状态显示归属用户、右上角汇总「正在尝试」的用户名。
