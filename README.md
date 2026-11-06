@@ -11,9 +11,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#)
-[![Release](https://img.shields.io/badge/release-v2.0.1-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v2.0.1)
+[![Release](https://img.shields.io/badge/release-v2.0.2-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v2.0.2)
 
-> 📦 **Windows 用户**：[下载 `st-rotator-2.0.1-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v2.0.1/st-rotator-2.0.1-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
+> 📦 **Windows 用户**：[下载 `st-rotator-2.0.2-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v2.0.2/st-rotator-2.0.2-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
 
 ![控制台](docs/console.png)
 
@@ -58,11 +58,11 @@
 
 ### Windows 免安装（推荐）
 
-从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v2.0.1) 下载 **[`st-rotator-2.0.1-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v2.0.1/st-rotator-2.0.1-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
+从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v2.0.2) 下载 **[`st-rotator-2.0.2-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v2.0.2/st-rotator-2.0.2-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
 
 | 文件 | 用途 |
 |---|---|
-| `st-rotator-2.0.1-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
+| `st-rotator-2.0.2-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
 
 > ⚠️ **不要解压到 `C:\Program Files`**：程序运行时会往 **exe 同目录**写 `config.json`、`rotator.log`、`subkeys.json`、`.tray-token`、`.tray-icons/`，放到无写权限的目录会失败。
 
@@ -152,8 +152,67 @@ resp = client.chat.completions.create(
 | `POST /v1/chat/completions` | 对话补全，支持 `stream` 与非流式 |
 | `GET /v1/models` | 模型列表 |
 | `POST /v1/*` | 其余端点（embeddings 等）原样透传，同样享受轮换 |
+| `POST /anthropic/v1/messages` | **Anthropic Messages**，支持 `stream` 与非流式 |
+| `GET /anthropic/v1/models` | Anthropic 侧模型列表（同样受可用模型白名单过滤） |
 | `GET /healthz` | 健康检查（**无需 token**，可接监控探针） |
 | `GET /stats` | 每把 Key 的成功 / 失败 / 429 次数、当前自适应速率 |
+
+### Anthropic Messages 端点
+
+上游商汤同时提供 OpenAI 与 Anthropic 两套 API。本网关把 Anthropic 放在**独立前缀**
+`/anthropic` 下，与 OpenAI 兼容的 `/v1` 完全分开——两套的请求体语义、认证头、流式事件
+格式都不同，混在一个前缀下会互相干扰。
+
+| 配置项 | 值 |
+|---|---|
+| `ANTHROPIC_BASE_URL` | `http://127.0.0.1:8899/anthropic` |
+| API Key | 启动时 `--token` 的本地口令（也接受用户 Key） |
+| 认证头 | `x-api-key` 或 `Authorization: Bearer` 都行 |
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(
+    base_url="http://127.0.0.1:8899/anthropic",
+    api_key="<本地口令>",
+)
+msg = client.messages.create(
+    model="deepseek-v4-flash",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "你好"}],
+)
+print(msg.content)
+```
+
+```bash
+# 或者直接 curl
+curl http://127.0.0.1:8899/anthropic/v1/messages \
+  -H "x-api-key: <本地口令>" -H 'anthropic-version: 2023-06-01' \
+  -H 'content-type: application/json' \
+  -d '{"model":"deepseek-v4-flash","max_tokens":256,
+       "messages":[{"role":"user","content":"你好"}]}'
+```
+
+特点：
+
+* **流式事件原样透传**：`message_start → content_block_start → content_block_delta* →
+  content_block_stop → message_delta → message_stop`，事件名与 data 里的 `type` 保持一致，
+  客户端状态机不会被破坏。
+* **错误体是 Anthropic 形状**（`{"type":"error","error":{…}}`），而不是 OpenAI 的
+  `{"error":{…}}`——给错形状会让 Anthropic SDK 抛更晦涩的异常。
+* **同样享受 Key 轮换与 429 消化**：轮换发生在首字节之前，上层只看到稳定端点。
+* **支持 `thinking` 块**：推理模型会先给 `thinking_delta`，再给 `text_delta`。
+  注意 `thinking` 与 `text` 共用 `max_tokens` 预算，**建议 ≥ 500**。
+* **请求体做等价清洗**：商汤对 Anthropic 请求同样比官方严，实测
+  `assistant/user.content = null`、`system = null`、`temperature`/`max_tokens`
+  传字符串都会 400，网关会自动规范化成等价写法再转发（详见
+  [400 排查](#400-inference-request-is-invalidcode-3--invalid_parameter_error)）。
+* **不代理** `POST /anthropic/v1/messages/count_tokens`：上游没有这个端点（404）。
+
+> ⚠️ 调用方用来访问**本网关**的凭据头（`x-api-key` / `authorization`）**绝不会**透传给上游。
+> 一旦透传，上游会同时收到「池 Key」和「网关 token」两个凭据，实测直接返回
+> `401 Forbidden`，而 401 会被判成凭据失效，把一整池好 Key 全打成 INVALID
+> （只能等 `invalid_ttl` 或重启恢复）。这是 v2.0.2 修掉的一个严重 bug。
 
 ### 用户 Key
 
@@ -631,7 +690,15 @@ packaging/          # 打包（单 exe：build.py 构建脚本、entry.py 入口
 
 ## 历史版本
 
-- **v2.0.1（当前）**：**补齐 400 的清洗规则。** v2.0.0 只处理了 `content: null`，
+- **v2.0.2（当前）**：**新增 Anthropic Messages 端点（独立前缀 `/anthropic`）**，
+  把上游的 `/v1/messages` 也纳入 Key 轮换与 429 消化：非流式与流式（`message_start` /
+  `content_block_delta` / `message_stop` 具名事件原样透传）、Anthropic 形状错误体、
+  `x-api-key` 与 `Bearer` 双认证、`thinking` 块透传、Anthropic 侧请求体清洗
+  （`content:null` / `system:null` / 数值字符串）。同时修掉一个**严重的凭据泄漏 bug**：
+  调用方用来访问网关的 `x-api-key` / `authorization` 以前会被透传给上游，导致上游同时
+  收到「池 Key」和「网关 token」而返回 `401 Forbidden`，进而把一整池好 Key 误判失效
+  （只能等 `invalid_ttl` 或重启）。另修正 403 分类：非凭据文案的 403 不再判失效。
+- **v2.0.1**：**补齐 400 的清洗规则。** v2.0.0 只处理了 `content: null`，
   实测仍有一批写法会 400，本版全部覆盖：`role: "developer"`（Codex 等新框架常用）
   → 映射成 `system`、`tool` 消息的 `content: null`、`tool_calls[*].function.arguments`
   传对象（序列化成 JSON 字符串）、`content` 传数字（转字符串）、

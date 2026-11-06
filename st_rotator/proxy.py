@@ -40,6 +40,7 @@ from .client import StRotator, note_serve_begin, note_serve_end
 from .errors import AllKeysInvalid, ApiError, NoAvailableKey, RotationExhausted, RotatorError
 from .keypool import user_context
 from .subkeys import SubKey, SubKeyManager
+from . import anthropic
 from . import ui
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -50,6 +51,12 @@ CHAT_PATH = "/v1/chat/completions"
 MODELS_PATH = "/v1/models"
 HEALTH_PATHS = ("/healthz", "/health")
 STATS_PATH = "/stats"
+
+# Anthropic Messages 走**独立前缀**，不与 OpenAI 兼容的 /v1 混用。
+# 客户端把 ANTHROPIC_BASE_URL 指向 http://<host>:<port>/anthropic 即可。
+ANTHROPIC_PREFIX = "/anthropic"
+ANTHROPIC_MESSAGES_PATH = "/anthropic/v1/messages"
+ANTHROPIC_MODELS_PATH = "/anthropic/v1/models"
 
 MAX_BODY_BYTES = 32 * 1024 * 1024
 
@@ -346,6 +353,14 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
         else:
             sys.stderr.write("[proxy] " + line + "\n")
 
+    def _log(self, message: str) -> None:
+        """写一条网关日志（走 log_sink，与控制台共用同一出口）。"""
+        sink = type(self).log_sink
+        if sink is not None:
+            sink(message)
+        else:
+            sys.stderr.write("[proxy] " + message + "\n")
+
     def _read_body(self) -> bytes:
         """读取请求体，同时支持 Content-Length 与 chunked。"""
         if (self.headers.get("Transfer-Encoding") or "").lower() == "chunked":
@@ -383,9 +398,20 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
         * "sub"   — 匹配某个已启用的对外用户 Key（只能调 /v1/*，永远进不了控制台）；
         * "open"  — 未配置管理 Token 且未启用任何用户 Key（完全开放，仅监听本机）；
         * None    — 凭据缺失或无效。
+
+        凭据来源同时支持两种写法：
+
+        * ``Authorization: Bearer <token>`` —— OpenAI 客户端 / 本网关惯例；
+        * ``x-api-key: <token>`` —— Anthropic 客户端（含官方 SDK）的惯例。
+
+        两种都指向同一套凭据（管理 Token 或某个用户 Key），只是承载头不同。
+        Anthropic 客户端只会发 ``x-api-key``，不认这个头的话新增端点等于用不了。
         """
         header = self.headers.get("Authorization") or ""
         supplied = header[7:].strip() if header.lower().startswith("bearer ") else header.strip()
+        if not supplied:
+            # Anthropic 惯例：x-api-key（无 Bearer 前缀）
+            supplied = (self.headers.get("x-api-key") or "").strip()
         if self.token and supplied and hmac.compare_digest(supplied, self.token):
             return "admin", None
         subkeys = type(self).subkeys
@@ -423,7 +449,17 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             pass
 
     def _forwardable_headers(self) -> dict[str, str]:
-        """提取需要透传给上游的请求头（追踪 ID、租户、组织、自定义 x- 头等）。"""
+        """提取需要透传给上游的请求头（追踪 ID、租户、组织、自定义 x- 头等）。
+
+        **绝不能透传调用方的凭据头**（``x-api-key`` / ``authorization``）：
+
+        这两个头装的是**调用方用来访问本网关**的凭据（管理 Token 或用户 Key），
+        与池里真正用来访问上游的商汤 Key 是两回事。一旦透传，上游会同时收到
+        「池 Key」和「网关 token」两个凭据，实测直接返回
+        ``401 {"error":{"code":16,"message":"Forbidden"}}`` —— 而 401 会被判成
+        「凭据失效」，于是一整池好 Key 全被打成 INVALID（只能等 invalid_ttl 或重启）。
+        这个坑在 Anthropic 端点接入时触发：Anthropic 客户端正是用 ``x-api-key`` 认证。
+        """
         forward_headers: dict[str, str] = {}
         allowed_specific = {
             "x-request-id",
@@ -434,8 +470,17 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             "openai-project",
             "openai-beta",
         }
+        # 凭据类头一律不透传（大小写不敏感）
+        credential_headers = {
+            "x-api-key",
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+        }
         for key, val in self.headers.items():
             k_lower = key.lower()
+            if k_lower in credential_headers:
+                continue
             if k_lower in allowed_specific or (
                 k_lower.startswith("x-")
                 and k_lower not in ("x-forwarded-for", "x-forwarded-proto", "x-forwarded-host")
@@ -560,6 +605,9 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
         self._auth_role = role
         self._auth_subkey = sub
         with user_context(self._user_label(role, sub)):
+            if path == ANTHROPIC_MODELS_PATH:
+                self._handle_anthropic_models()
+                return
             self._dispatch_proxy("GET", path, query_suffix=f"?{parsed.query}" if parsed.query else "")
 
     def do_POST(self) -> None:  # noqa: N802
@@ -594,6 +642,17 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
 
         query_suffix = f"?{parsed.query}" if parsed.query else ""
         with user_context(self._user_label(role, sub)):
+            if path == ANTHROPIC_MESSAGES_PATH:
+                self._handle_anthropic_messages(raw)
+                return
+            if path.startswith(ANTHROPIC_PREFIX + "/"):
+                self._send_json(
+                    404,
+                    anthropic.anthropic_error(
+                        "not_found_error", f"no such anthropic route: POST {path}"
+                    ),
+                )
+                return
             self._dispatch_proxy("POST", path, raw=raw, query_suffix=query_suffix)
 
     def _dispatch_proxy(self, method: str, path: str, *, raw: bytes = b"", query_suffix: str = "") -> None:
@@ -689,6 +748,238 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             self._chat_stream(messages, model, params, headers=headers)
         else:
             self._chat_complete(messages, model, params, headers=headers)
+
+    # ------------------------------------------------------------ Anthropic 端点
+
+    def _send_anthropic_error(self, status: int, message: str, *, retry_after: float | None = None) -> None:
+        """按 Anthropic 形状回错误。
+
+        Anthropic 客户端（含官方 SDK）按 ``{"type":"error","error":{...}}`` 解析错误；
+        回 OpenAI 的 ``{"error":{...}}`` 会让它把响应当成"非错误"从而抛出更晦涩的异常。
+        """
+        payload = anthropic.anthropic_error(anthropic.anthropic_error_type_for(status), message)
+        self._send_json(status, payload, retry_after=retry_after)
+
+    def _handle_anthropic_models(self) -> None:
+        """``GET /anthropic/v1/models``：把上游模型清单按白名单过滤后返回。
+
+        复用 OpenAI 那套 ``/v1/models`` 的结果（上游只有一份清单），
+        这样控制台里的「可用模型」白名单对两条链路同时生效。
+        """
+        try:
+            result = self.rotator.request("models", method="GET")
+        except ApiError as exc:
+            self._send_anthropic_error(exc.status, exc.body[:800] or "upstream error")
+            return
+        except RotationExhausted as exc:
+            status = exc.last_status if (exc.last_status or 0) >= 400 else 502
+            self._send_anthropic_error(status, str(exc))
+            return
+        except NoAvailableKey as exc:
+            self._send_anthropic_error(429, str(exc), retry_after=exc.retry_after)
+            return
+        except AllKeysInvalid as exc:
+            self._send_anthropic_error(503, str(exc))
+            return
+        except RotatorError as exc:
+            self._send_anthropic_error(502, str(exc))
+            return
+        filtered = self.rotator.filter_models_payload(result)
+        # Anthropic 的清单形状与 OpenAI 近似（都是 {"data":[{"id":…}]}），
+        # 但补上 type 字段更贴近 Anthropic 客户端预期。
+        if isinstance(filtered, dict) and isinstance(filtered.get("data"), list):
+            items = []
+            for item in filtered["data"]:
+                if isinstance(item, dict):
+                    patched = dict(item)
+                    patched.setdefault("type", "model")
+                    patched.setdefault("display_name", item.get("id"))
+                    items.append(patched)
+                else:
+                    items.append(item)
+            filtered = dict(filtered)
+            filtered["data"] = items
+        self._send_json(200, filtered)
+
+    def _handle_anthropic_messages(self, raw: bytes) -> None:
+        """``POST /anthropic/v1/messages``：Anthropic Messages（含流式），走 Key 池轮换。"""
+        if self._paused:
+            self._send_anthropic_error(503, "gateway paused from console")
+            return
+        try:
+            payload = anthropic.load_json_object(raw)
+        except ValueError as exc:
+            self._send_anthropic_error(400, str(exc))
+            return
+
+        model = payload.get("model")
+        model_id = str(model) if model is not None else None
+        stream = anthropic.is_sse_response(payload)
+
+        # 路由层真实拦截：模型不在白名单就直接 400，不消耗上游额度。
+        blocked = self.rotator.model_block_reason(model_id)
+        if blocked is not None:
+            self._send_anthropic_error(400, blocked)
+            self._record_subkey_usage(ok=False, model=model_id, stream=stream)
+            return
+
+        # 清洗「上游必 400」的写法（Anthropic 侧的严格点与 OpenAI 侧不同，见 module doc）。
+        sanitized, changes = anthropic.sanitize_message_request(payload)
+        if changes:
+            self._log(f"[Anthropic] 已规范化请求体字段 {', '.join(changes)}")
+
+        if self.console is not None:
+            self.console.metrics.note_request(stream=stream)
+
+        headers = self._forwardable_headers()
+        # Anthropic 请求体里没有 OpenAI 那套采样字段，清洗已在上一步完成，
+        # 这里只需带上 anthropic-version 之类的版本头。
+        if not any(k.lower() == "anthropic-version" for k in headers):
+            headers["anthropic-version"] = anthropic.DEFAULT_ANTHROPIC_VERSION
+        if stream:
+            self._anthropic_stream(sanitized, model_id, headers=headers)
+        else:
+            self._anthropic_complete(sanitized, model_id, headers=headers)
+
+    def _anthropic_complete(
+        self, payload: dict, model: str | None, *, headers: Mapping[str, str] | None = None
+    ) -> None:
+        started = time.monotonic()
+        try:
+            result = self.rotator.anthropic_message(payload, headers=headers)
+        except ApiError as exc:
+            # 上游错误体已经是 Anthropic 形状，原样透传最有信息量。
+            self._send_anthropic_passthrough(exc.status, exc.body)
+            self._record_subkey_usage(ok=False, model=model, latency_ms=_elapsed_ms(started))
+            return
+        except RotationExhausted as exc:
+            status = exc.last_status if (exc.last_status or 0) >= 400 else 502
+            self._send_anthropic_error(status, str(exc))
+            self._record_subkey_usage(ok=False, model=model, latency_ms=_elapsed_ms(started))
+            return
+        except NoAvailableKey as exc:
+            self._send_anthropic_error(429, str(exc), retry_after=exc.retry_after)
+            self._record_subkey_usage(ok=False, model=model, latency_ms=_elapsed_ms(started))
+            return
+        except AllKeysInvalid as exc:
+            self._send_anthropic_error(503, str(exc))
+            self._record_subkey_usage(ok=False, model=model, latency_ms=_elapsed_ms(started))
+            return
+        except RotatorError as exc:
+            self._send_anthropic_error(502, str(exc))
+            self._record_subkey_usage(ok=False, model=model, latency_ms=_elapsed_ms(started))
+            return
+        self._record_subkey_usage(
+            ok=True,
+            model=model,
+            usage=anthropic.extract_message_usage(result),
+            messages=payload.get("messages"),
+            latency_ms=_elapsed_ms(started),
+        )
+        self._send_json(200, result)
+
+    def _send_anthropic_passthrough(self, status: int, body: str) -> None:
+        """上游错误体若已是 Anthropic 形状就原样转发，否则包一层。"""
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict) and parsed.get("type") == "error":
+                self._send_json(status, parsed)
+                return
+        except (json.JSONDecodeError, TypeError):
+            pass
+        self._send_anthropic_error(status, (body or "upstream error")[:800])
+
+    def _anthropic_stream(
+        self, payload: dict, model: str | None, *, headers: Mapping[str, str] | None = None
+    ) -> None:
+        """流式转发 Anthropic SSE：逐事件透传，不解析语义。
+
+        为什么要原样转发事件而不是"翻译"：Anthropic 的流式是具名事件
+        （``message_start`` / ``content_block_start`` / ``content_block_delta`` /
+        ``message_delta`` / ``message_stop``…），客户端靠事件名驱动状态机
+        （尤其 ``thinking_delta`` / ``input_json_delta`` 这类增量）。
+        一旦在这里做任何重组，都会让客户端状态错乱。
+        """
+        started = time.monotonic()
+        stream = self.rotator.anthropic_message_stream(payload, headers=headers)
+        first = None
+        has_first = False
+        try:
+            first = next(stream)
+            has_first = True
+        except StopIteration:
+            self._begin_stream()
+            try:
+                self._end_stream()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            self._record_subkey_usage(
+                ok=True, model=model, stream=True, messages=payload.get("messages"),
+                latency_ms=_elapsed_ms(started),
+            )
+            return
+        except ApiError as exc:
+            self._send_anthropic_passthrough(exc.status, exc.body)
+            self._record_subkey_usage(ok=False, model=model, stream=True, latency_ms=_elapsed_ms(started))
+            return
+        except RotationExhausted as exc:
+            status = exc.last_status if (exc.last_status or 0) >= 400 else 502
+            self._send_anthropic_error(status, str(exc))
+            self._record_subkey_usage(ok=False, model=model, stream=True, latency_ms=_elapsed_ms(started))
+            return
+        except NoAvailableKey as exc:
+            self._send_anthropic_error(429, str(exc), retry_after=exc.retry_after)
+            self._record_subkey_usage(ok=False, model=model, stream=True, latency_ms=_elapsed_ms(started))
+            return
+        except AllKeysInvalid as exc:
+            self._send_anthropic_error(503, str(exc))
+            self._record_subkey_usage(ok=False, model=model, stream=True, latency_ms=_elapsed_ms(started))
+            return
+        except RotatorError as exc:
+            self._send_anthropic_error(502, str(exc))
+            self._record_subkey_usage(ok=False, model=model, stream=True, latency_ms=_elapsed_ms(started))
+            return
+
+        self._begin_stream()
+        ok = True
+        usage: tuple[int, int, int] | None = None
+        try:
+            if has_first:
+                self._write_chunk(self._anthropic_sse(first))
+                usage = usage or anthropic.extract_message_usage(first)
+            for chunk in stream:
+                self._write_chunk(self._anthropic_sse(chunk))
+                usage = usage or anthropic.extract_message_usage(chunk)
+        except RotatorError as exc:
+            ok = False
+            # 已经发出 200 了，改不了状态码：补一个 Anthropic 形状的 error 事件收尾。
+            try:
+                self._write_chunk(self._anthropic_sse(
+                    anthropic.anthropic_error("api_error", str(exc))
+                ))
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            ok = False
+        finally:
+            try:
+                self._end_stream()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            self._record_subkey_usage(
+                ok=ok, model=model, stream=True, usage=usage,
+                messages=payload.get("messages"), latency_ms=_elapsed_ms(started),
+            )
+
+    @staticmethod
+    def _anthropic_sse(event: Mapping[str, Any]) -> bytes:
+        """把一条 Anthropic 事件渲染成 ``event: <name>\\ndata: <json>\\n\\n``。
+
+        下游客户端按 event 名驱动状态机，所以事件名必须与 data 里的 ``type`` 一致。
+        """
+        name = event.get("type") if isinstance(event.get("type"), str) else "message"
+        data = json.dumps(event, ensure_ascii=False)
+        return f"event: {name}\ndata: {data}\n\n".encode("utf-8")
 
     def _chat_complete(
         self, messages: Any, model: str | None, params: dict, headers: Mapping[str, str] | None = None

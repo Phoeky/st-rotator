@@ -203,13 +203,22 @@ class ConsoleState:
         return self.rotator.config
 
     def gateway_info(self) -> dict[str, Any]:
-        """给上层应用抄的接入信息。"""
+        """给上层应用抄的接入信息。
+
+        同时给出 OpenAI 兼容（``/v1``）与 Anthropic Messages（``/anthropic``）
+        两条链路的地址——后者是独立前缀，Anthropic 客户端把
+        ``ANTHROPIC_BASE_URL`` 指到 ``/anthropic`` 即可。
+        """
         base = f"http://{self.host}:{self.port}"
         return {
             "listen": f"{self.host}:{self.port}",
             "base_url": f"{base}/v1",
             "chat_endpoint": f"{base}/v1/chat/completions",
             "models_endpoint": f"{base}/v1/models",
+            # Anthropic Messages：独立前缀，认证头用 x-api-key（也接受 Bearer）
+            "anthropic_base_url": f"{base}/anthropic",
+            "anthropic_messages_endpoint": f"{base}/anthropic/v1/messages",
+            "anthropic_models_endpoint": f"{base}/anthropic/v1/models",
             "health_endpoint": f"{base}/healthz",
             "stats_endpoint": f"{base}/stats",
             "console_url": f"{base}/",
