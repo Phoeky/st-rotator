@@ -658,6 +658,8 @@ function renderGateway(state) {
   var rows = [
     ["Base URL", g.base_url],
     ["对话端点", g.chat_endpoint],
+    ["Anthropic Base URL", g.anthropic_base_url],
+    ["Anthropic 端点", g.anthropic_messages_endpoint],
     ["API Key", tokenText],
     ["上游", g.upstream],
     ["健康检查", g.health_endpoint],
@@ -665,13 +667,14 @@ function renderGateway(state) {
   ];
   $("gateway").innerHTML = rows.map(function (r) {
     return '<div class="kv"><span class="k">' + esc(r[0]) + '</span>' +
-      '<span class="v grow">' + esc(r[1]) + '</span></div>';
+      '<span class="v grow">' + esc(r[1] || "") + '</span></div>';
   }).join("");
   renderSnippet(g);
 }
 
 function renderSnippetTabs() {
-  var tabs = [["python", "Python (OpenAI SDK)"], ["curl", "cURL"], ["node", "Node.js"], ["generic", "通用 Agent 配置"]];
+  var tabs = [["python", "Python (OpenAI SDK)"], ["curl", "cURL"], ["node", "Node.js"],
+              ["anthropic", "Anthropic / Claude"], ["generic", "通用 Agent 配置"]];
   $("snippet-tabs").innerHTML = tabs.map(function (t) {
     return '<button data-tab="' + t[0] + '" class="' + (S.tab === t[0] ? "active" : "") + '">' + esc(t[1]) + '</button>';
   }).join("");
@@ -686,10 +689,32 @@ function renderSnippet(g) {
   if (g) lastGateway = g;
   g = lastGateway || {};
   var base = g.base_url || "http://127.0.0.1:8080/v1";
+  var anthropicBase = g.anthropic_base_url || (base.replace(/\/v1$/, "") + "/anthropic");
   var token = g.token || "sk-local-any";
   var model = g.model || "deepseek-v4-flash";
   var text;
-  if (S.tab === "curl") {
+  if (S.tab === "anthropic") {
+    text = '# Claude Code / Anthropic SDK 等客户端\n' +
+      'ANTHROPIC_BASE_URL : ' + anthropicBase + '\n' +
+      'ANTHROPIC_API_KEY  : ' + token + '   # 网关本地 Token，不是商汤 Key\n' +
+      'model              : ' + model + '\n' +
+      'stream             : 支持（thinking / tool_use 事件原样透传）\n\n' +
+      'from anthropic import Anthropic\n\n' +
+      'client = Anthropic(\n' +
+      '    base_url="' + anthropicBase + '",\n' +
+      '    api_key="' + token + '",   # 网关本地鉴权，非商汤 Key\n' +
+      ')\n\n' +
+      'msg = client.messages.create(\n' +
+      '    model="' + model + '",\n' +
+      '    max_tokens=1024,          # 推理模型的 thinking 也吃这个预算，别给小\n' +
+      '    messages=[{"role": "user", "content": "你好"}],\n' +
+      ')\n' +
+      'print(msg.content)\n\n' +
+      '# 说明\n' +
+      '#   - 这是独立前缀，和上面的 OpenAI 兼容 /v1 互不影响\n' +
+      '#   - x-api-key 与 Authorization: Bearer 两种认证头都接受\n' +
+      '#   - Key 轮换 / 429 消化 / 冷却都在网关内完成，上层无感知';
+  } else if (S.tab === "curl") {
     text = 'curl ' + base + '/chat/completions \\\n' +
       '  -H "Content-Type: application/json" \\\n' +
       '  -H "Authorization: Bearer ' + token + '" \\\n' +
@@ -713,14 +738,20 @@ function renderSnippet(g) {
       '  process.stdout.write(chunk.choices[0]?.delta?.content ?? "");\n' +
       '}';
   } else if (S.tab === "generic") {
-    text = '# 通用 OpenAI 兼容配置（WorkBuddy / Dify / Cherry Studio / LobeChat …）\n' +
+    text = '# 通用配置（WorkBuddy / Dify / Cherry Studio / LobeChat / Claude Code …）\n\n' +
+      '# —— OpenAI 兼容（多数上层应用）——\n' +
       'base_url : ' + base + '\n' +
       'api_key  : ' + token + '\n' +
       'model    : ' + model + '\n' +
       'stream   : 支持（含 tool_calls 透传）\n\n' +
+      '# —— Anthropic Messages（Claude Code 等 Anthropic 生态）——\n' +
+      'ANTHROPIC_BASE_URL : ' + anthropicBase + '\n' +
+      'ANTHROPIC_API_KEY  : ' + token + '\n' +
+      'model              : ' + model + '\n' +
+      'stream             : 支持（thinking / tool_use 事件透传）\n\n' +
       '# 说明\n' +
-      '#   - 上层的 api_key 填上面这个本地 Token，不是商汤的 sk- Key\n' +
-      '#   - 商汤的多把 Key 全部由本网关内部轮换，上层无感知\n' +
+      '#   - api_key 一律填上面这个本地 Token，不是商汤的 sk- Key\n' +
+      '#   - 两条链路共用一个 Key 池：商汤的多把 Key 由网关内部轮换，上层无感知\n' +
       '#   - 429 / 冷却 / 坏 Key 隔离都在网关内消化';
   } else {
     text = 'from openai import OpenAI\n\n' +

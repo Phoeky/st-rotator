@@ -1,9 +1,10 @@
 # st-rotator
 
-**面向 OpenAI 兼容端点的多 Key 轮换 + 限流自愈网关。**
+**多 Key 轮换 + 限流自愈网关：同时提供 OpenAI 与 Anthropic 两套兼容端点。**
 
 把多把 API Key 池化成一个稳定的本地端点，让上层应用在服务端限流下保持高成功率与低延迟。
-适配商汤日日新（SenseNova）等 OpenAI 兼容服务，可直接接进 WorkBuddy 等上层应用。
+适配商汤日日新（SenseNova）等 OpenAI 兼容服务，可直接接进 WorkBuddy 等上层应用；
+同时提供 **Anthropic Messages 端点**，Claude Code 等 Anthropic 生态客户端也能直接接入。
 
 > ⚠️ **使用前请先读 [合规与免责声明](#合规与免责声明)。**
 > 本项目与任何服务商均无关联，仅供你使用**本人有权使用**的凭据。
@@ -11,9 +12,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#)
-[![Release](https://img.shields.io/badge/release-v2.0.2-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v2.0.2)
+[![Release](https://img.shields.io/badge/release-v3.0.0-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v3.0.0)
 
-> 📦 **Windows 用户**：[下载 `st-rotator-2.0.2-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v2.0.2/st-rotator-2.0.2-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
+> 📦 **Windows 用户**：[下载 `st-rotator-3.0.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v3.0.0/st-rotator-3.0.0-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
 
 ![控制台](docs/console.png)
 
@@ -49,6 +50,7 @@
 
 - **零第三方依赖** —— 纯 Python 标准库实现，`clone` 完就能跑，内网 / 容器 / 离线机器都不挑
 - **本地 OpenAI 兼容网关** —— 上层只看到一个稳定端点，限流、冷却、Key 轮换全部在内部消化
+- **本地 Anthropic Messages 网关** —— 独立 `/anthropic` 前缀，`Claude Code` 等 Anthropic 生态客户端可直接接入，与 OpenAI 链路共用同一个 Key 池
 - **图形控制台** —— 看池子状态、加 / 删 / 体检 Key、切换模型、复制接入片段、看实时日志
 - **系统托盘（Windows）** —— 图标颜色即健康度，双击开控制台，右键可操作
 - **用户 Key** —— 签发多把独立对外凭据，按用户 Key 统计输入 / 输出 token 与缓存命中；用户 Key 只能调 API，无法访问管理页面
@@ -58,11 +60,11 @@
 
 ### Windows 免安装（推荐）
 
-从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v2.0.2) 下载 **[`st-rotator-2.0.2-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v2.0.2/st-rotator-2.0.2-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
+从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v3.0.0) 下载 **[`st-rotator-3.0.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v3.0.0/st-rotator-3.0.0-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
 
 | 文件 | 用途 |
 |---|---|
-| `st-rotator-2.0.2-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
+| `st-rotator-3.0.0-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
 
 > ⚠️ **不要解压到 `C:\Program Files`**：程序运行时会往 **exe 同目录**写 `config.json`、`rotator.log`、`subkeys.json`、`.tray-token`、`.tray-icons/`，放到无写权限的目录会失败。
 
@@ -690,11 +692,15 @@ packaging/          # 打包（单 exe：build.py 构建脚本、entry.py 入口
 
 ## 历史版本
 
-- **v2.0.2（当前）**：**新增 Anthropic Messages 端点（独立前缀 `/anthropic`）**，
+- **v3.0.0（当前）**：**新增 Anthropic Messages 端点（独立前缀 `/anthropic`）—— 大版本更新。**
+  在此之前网关只服务 OpenAI 兼容客户端；现在 **Claude Code 等 Anthropic 生态客户端可以直接接入**，
+  两条链路共用一个 Key 池。
   把上游的 `/v1/messages` 也纳入 Key 轮换与 429 消化：非流式与流式（`message_start` /
   `content_block_delta` / `message_stop` 具名事件原样透传）、Anthropic 形状错误体、
   `x-api-key` 与 `Bearer` 双认证、`thinking` 块透传、Anthropic 侧请求体清洗
-  （`content:null` / `system:null` / 数值字符串）。同时修掉一个**严重的凭据泄漏 bug**：
+  （`content:null` / `system:null` / 数值字符串）。控制台「网关接入信息」同时给出两条链路
+  地址，速贴片段新增 `Anthropic / Claude` 页签。
+  同时修掉一个**严重的凭据泄漏 bug**：
   调用方用来访问网关的 `x-api-key` / `authorization` 以前会被透传给上游，导致上游同时
   收到「池 Key」和「网关 token」而返回 `401 Forbidden`，进而把一整池好 Key 误判失效
   （只能等 `invalid_ttl` 或重启）。另修正 403 分类：非凭据文案的 403 不再判失效。
