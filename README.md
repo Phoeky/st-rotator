@@ -12,9 +12,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#)
-[![Release](https://img.shields.io/badge/release-v3.0.0-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v3.0.0)
+[![Release](https://img.shields.io/badge/release-v3.0.1-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v3.0.1)
 
-> 📦 **Windows 用户**：[下载 `st-rotator-3.0.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v3.0.0/st-rotator-3.0.0-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
+> 📦 **Windows 用户**：[下载 `st-rotator-3.0.1-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v3.0.1/st-rotator-3.0.1-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
 
 ![控制台](docs/console.png)
 
@@ -56,15 +56,27 @@
 - **用户 Key** —— 签发多把独立对外凭据，按用户 Key 统计输入 / 输出 token 与缓存命中；用户 Key 只能调 API，无法访问管理页面
 - **配置热更新** —— 控制台里改完立即生效并落盘，不需要重启任何东西
 
+## 商汤模型兼容规则
+
+OpenAI 聊天入口（含 Python 客户端、默认模型与流式请求）按最终模型应用兼容策略：
+
+- `glm-5.3` 只接受 `low / high / max`：`xhigh → max`，`none / off / minimal / medium → low`。其他已验证模型按各自词表归位，不做全局档位替换；未知模型保持原样。已知模型的无效档位字段会被移除。
+- `kimi-k3` 的 `temperature` 只有 `1` 合法：已传且非 `1` 时纠正，未传不补。其他模型温度不变。
+- 控制台及 OpenAI / Anthropic 模型列表统一将 `sensenova-6.8-flash` 的上下文元数据纠正为 `1048576`，Flash-Lite 仍为 `262144`。依据为源项目 2026-11-17 的实测记录；上游真实限制变更时需复验。这只纠正元数据，不会扩大真实窗口或改写请求的 `max_tokens`。
+
+上述请求参数策略不应用于 Anthropic Messages 或其他透传 API，不转换 Anthropic `thinking`；窗口/输出上限设置面板暂不提供。
+
+离线回归：`python -B tests/test_model_policy.py`（无需真实 Key，不请求真实上游）。
+
 ## 快速开始
 
 ### Windows 免安装（推荐）
 
-从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v3.0.0) 下载 **[`st-rotator-3.0.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v3.0.0/st-rotator-3.0.0-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
+从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v3.0.1) 下载 **[`st-rotator-3.0.1-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v3.0.1/st-rotator-3.0.1-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
 
 | 文件 | 用途 |
 |---|---|
-| `st-rotator-3.0.0-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
+| `st-rotator-3.0.1-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
 
 > ⚠️ **不要解压到 `C:\Program Files`**：程序运行时会往 **exe 同目录**写 `config.json`、`rotator.log`、`subkeys.json`、`.tray-token`、`.tray-icons/`，放到无写权限的目录会失败。
 
@@ -692,7 +704,7 @@ packaging/          # 打包（单 exe：build.py 构建脚本、entry.py 入口
 
 ## 历史版本
 
-- **v3.0.0（当前）**：**新增 Anthropic Messages 端点（独立前缀 `/anthropic`）—— 大版本更新。**
+- **v3.0.1（当前）**：**新增 Anthropic Messages 端点（独立前缀 `/anthropic`）—— 大版本更新。**
   在此之前网关只服务 OpenAI 兼容客户端；现在 **Claude Code 等 Anthropic 生态客户端可以直接接入**，
   两条链路共用一个 Key 池。
   把上游的 `/v1/messages` 也纳入 Key 轮换与 429 消化：非流式与流式（`message_start` /

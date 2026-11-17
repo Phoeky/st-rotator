@@ -39,6 +39,7 @@ from urllib.parse import parse_qs, urlparse
 from .client import StRotator, note_serve_begin, note_serve_end
 from .errors import AllKeysInvalid, ApiError, NoAvailableKey, RotationExhausted, RotatorError
 from .keypool import user_context
+from .model_policy import apply_chat_model_policy
 from .subkeys import SubKey, SubKeyManager
 from . import anthropic
 from . import ui
@@ -240,12 +241,14 @@ def sanitize_params(params: dict[str, Any]) -> dict[str, Any]:
 _NUMERIC_PARAMS = ("temperature", "top_p", "frequency_penalty", "presence_penalty")
 
 
-def sanitize_chat_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def sanitize_chat_payload(payload: dict[str, Any], *, model_policy: bool = True) -> dict[str, Any]:
     """对一整份 chat 请求体做清洗（供原样透传端点与测试使用）。"""
     if not isinstance(payload, dict):
         return payload
     sanitize_messages(payload.get("messages"))
     sanitize_params(payload)
+    if model_policy:
+        apply_chat_model_policy(payload)
     return payload
 
 
@@ -1116,7 +1119,8 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
         # 透传端点（/v1/responses、/v1/embeddings…）也做同一套清洗：
         # 商汤对 messages 的严格校验与端点无关，漏掉这里会让 Agent 换个入口再撞 400。
         if isinstance(body, dict):
-            sanitize_chat_payload(body)
+            # 保留既有通用清洗，但不把 Chat 专属模型策略套到其他 API。
+            sanitize_chat_payload(body, model_policy=False)
         # 路由层真实拦截：透传端点只要显式点名了模型，就按可用白名单拦一遍，
         # 名单外的模型直接 400，不消耗上游额度（见 model_filter.available 配置）。
         if record_usage and isinstance(body, dict) and body.get("model") is not None:
