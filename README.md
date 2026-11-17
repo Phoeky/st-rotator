@@ -268,7 +268,7 @@ exe 版和源码版共用同一套子命令：源码运行写 `python -m st_rota
 | `bench [-c <cfg>] -n N -p P` | 并发压测，验证轮换效果 |
 | `subkey <action> [-c <cfg>]` | 管理用户 Key（list / create / toggle / reset / revoke） |
 | `demo` | 离线演示，不需要真实 Key |
-| `--version` / `-V` | 打印版本号（exe 版输出 `st-rotator 1.4.0`） |
+| `--version` / `-V` | 打印版本号（exe 版输出 `st-rotator 3.0.1`） |
 
 > `-c/--config` **可以省略**：省略时默认用 `config.json`（exe 版 = exe 同目录，源码运行 = 当前目录）。
 > exe 版可直接 `st-rotator.exe status`、`st-rotator.exe --version`。
@@ -704,7 +704,20 @@ packaging/          # 打包（单 exe：build.py 构建脚本、entry.py 入口
 
 ## 历史版本
 
-- **v3.0.1（当前）**：**新增 Anthropic Messages 端点（独立前缀 `/anthropic`）—— 大版本更新。**
+- **v3.0.1（当前）**：**同步上游模型的真实参数限制，修掉一批「本来合法却被 400」的请求。**
+  商汤的合法参数是**按模型**判定的，不是全局一张表，所以本版把策略做成「按最终模型查表」：
+  * `glm-5.3` 的 `reasoning_effort` 只认 `low / high / max`：`xhigh` 由最高档承接，
+    `none / off / minimal / medium` 就近落到 `low`；其余已验证模型按各自词表归位，
+    **未知模型一律不改**（没有实测依据就不猜，避免掩盖上游的真实报错）。
+  * `kimi-k3` 的 `temperature` 只有 `1` 合法：已传且不等于 `1` 时纠正，**没传就不补**。
+  * `sensenova-6.8-flash` 的上下文元数据纠偏为 **1M**（上游误报 256K，实测
+    `1,047,536` tokens 仍成功）；Flash-Lite 实测确实是 256K，保持不变。控制台、
+    `/v1/models`、`/anthropic/v1/models` 三处口径一致。
+  策略只作用于 OpenAI 聊天参数，**不碰 Anthropic 的 `thinking`，也不套到
+  embeddings / responses 等透传端点**；元数据纠偏只影响「上层应用怎么算窗口」，
+  不会扩大上游真实上限，也不改写请求里的 `max_tokens`。
+  离线回归：`python -B tests/test_model_policy.py`。
+- **v3.0.0**：**新增 Anthropic Messages 端点（独立前缀 `/anthropic`）—— 大版本更新。**
   在此之前网关只服务 OpenAI 兼容客户端；现在 **Claude Code 等 Anthropic 生态客户端可以直接接入**，
   两条链路共用一个 Key 池。
   把上游的 `/v1/messages` 也纳入 Key 轮换与 429 消化：非流式与流式（`message_start` /
