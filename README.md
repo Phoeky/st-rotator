@@ -12,9 +12,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#)
-[![Release](https://img.shields.io/badge/release-v3.0.1-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v3.0.1)
+[![Release](https://img.shields.io/badge/release-v3.1.0-blue.svg)](https://github.com/Phoeky/st-rotator/releases/tag/v3.1.0)
 
-> 📦 **Windows 用户**：[下载 `st-rotator-3.0.1-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v3.0.1/st-rotator-3.0.1-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
+> 📦 **Windows 用户**：[下载 `st-rotator-3.1.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v3.1.0/st-rotator-3.1.0-win64.exe) —— 单个 exe 直接运行，无需解压，无需安装 Python、无需先配 Key。
 
 ![控制台](docs/console.png)
 
@@ -72,11 +72,11 @@ OpenAI 聊天入口（含 Python 客户端、默认模型与流式请求）按�
 
 ### Windows 免安装（推荐）
 
-从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v3.0.1) 下载 **[`st-rotator-3.0.1-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v3.0.1/st-rotator-3.0.1-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
+从 [Releases](https://github.com/Phoeky/st-rotator/releases/tag/v3.1.0) 下载 **[`st-rotator-3.1.0-win64.exe`](https://github.com/Phoeky/st-rotator/releases/download/v3.1.0/st-rotator-3.1.0-win64.exe)**，放到**有写权限**的目录直接双击即可，**不需要安装 Python**：
 
 | 文件 | 用途 |
 |---|---|
-| `st-rotator-3.0.1-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
+| `st-rotator-3.1.0-win64.exe` | 唯一的 exe（约 9 MB）。双击 = 托盘 + 网关 + 自动打开控制台；带子命令 = 命令行工具。示例配置见仓库里的 `config.example.json`，文档见本 README |
 
 > ⚠️ **不要解压到 `C:\Program Files`**：程序运行时会往 **exe 同目录**写 `config.json`、`rotator.log`、`subkeys.json`、`.tray-token`、`.tray-icons/`，放到无写权限的目录会失败。
 
@@ -268,7 +268,7 @@ exe 版和源码版共用同一套子命令：源码运行写 `python -m st_rota
 | `bench [-c <cfg>] -n N -p P` | 并发压测，验证轮换效果 |
 | `subkey <action> [-c <cfg>]` | 管理用户 Key（list / create / toggle / reset / revoke） |
 | `demo` | 离线演示，不需要真实 Key |
-| `--version` / `-V` | 打印版本号（exe 版输出 `st-rotator 3.0.1`） |
+| `--version` / `-V` | 打印版本号（exe 版输出 `st-rotator 3.1.0`） |
 
 > `-c/--config` **可以省略**：省略时默认用 `config.json`（exe 版 = exe 同目录，源码运行 = 当前目录）。
 > exe 版可直接 `st-rotator.exe status`、`st-rotator.exe --version`。
@@ -704,7 +704,12 @@ packaging/          # 打包（单 exe：build.py 构建脚本、entry.py 入口
 
 ## 历史版本
 
-- **v3.0.1（当前）**：**同步上游模型的真实参数限制，修掉一批「本来合法却被 400」的请求。**
+- **v3.1.0（当前）**：**支持生图模型与 `/v1/*` 通用接口原样透传（同步自 `dsh-sensenova-pool` v1.3.0）。**
+  - **生图与 `/v1/*` 通用透传**：除 `/v1/chat/completions` 与 `/v1/models` 外，现完整支持 `sensenova-u1.5-lite` 等生图模型使用的 `/v1/images/generations`、`/v1/images/edits`、`/v1/images/variations` 及其他合法 `/v1/*` 端点（支持 `GET` / `HEAD` / `POST` / `PUT` / `PATCH` / `DELETE`），均走多 Key 轮换池。
+  - **原样请求体与多格式兼容**：透传路径直接转发原始字节与 `Content-Type`，同时兼容商汤 JSON（`images` / `image_url` / `watermark` / `prompt_extend` 等）与 `multipart/form-data` 二进制表单上传，不经对话请求体清洗；响应原样透传状态码、二进制内容、HEAD/204 与 `text/event-stream` 流式数据（请求体上限提升至 64 MiB）。
+  - **生图独立超时保护**：`/v1/images/*` 默认单次上游读超时至少 **180 秒**（可通过配置项 `image_timeout` 覆盖），避免高分辨率生图/图生图被对话默认的 60 秒超时误杀并触发重复重试。
+  - **路径安全边界校验**：严格校验拼接后的上游 URL 同源且不越出 `base_url` 基准路径，拦截 `..`、`%2e%2e`、`//`、非法 `%` 编码、控制字符与非 `/v1/*` 路由，离线回归见 `tests/test_passthrough_images.py`。
+- **v3.0.1**：**同步上游模型的真实参数限制，修掉一批「本来合法却被 400」的请求。**
   商汤的合法参数是**按模型**判定的，不是全局一张表，所以本版把策略做成「按最终模型查表」：
   * `glm-5.3` 的 `reasoning_effort` 只认 `low / high / max`：`xhigh` 由最高档承接，
     `none / off / minimal / medium` 就近落到 `low`；其余已验证模型按各自词表归位，

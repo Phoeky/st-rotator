@@ -30,6 +30,7 @@ class Request:
     path: str
     headers: dict[str, str] = field(default_factory=dict)
     body: bytes | None = None
+    timeout: float | None = None
 
 
 def _split_lines(payload: bytes) -> Iterator[str]:
@@ -57,6 +58,13 @@ class Response:
 
     def iter_lines(self) -> Iterator[str]:
         yield from _split_lines(self.content)
+
+    def iter_chunks(self, chunk_size: int = 8192) -> Iterator[bytes]:
+        if self.content:
+            yield self.content
+
+    def read_all(self) -> bytes:
+        return self.content
 
     def close(self) -> None:
         """兼容流式响应的接口，内存响应无需处理。"""
@@ -101,6 +109,38 @@ class StreamResponse:
             raise
         finally:
             self.close()
+
+    def iter_chunks(self, chunk_size: int = 8192) -> Iterator[bytes]:
+        """按原始字节块流式读取（优先使用 read1，保证 SSE 事件即时透传）。"""
+        try:
+            while True:
+                if hasattr(self._raw, "read1"):
+                    chunk = self._raw.read1(chunk_size)
+                else:
+                    chunk = self._raw.read(chunk_size)
+                if not chunk:
+                    self._consumed_eof = True
+                    break
+                yield chunk
+        except Exception:
+            self._healthy = False
+            raise
+        finally:
+            self.close()
+
+    def read_all(self) -> bytes:
+        """一次性读取完整原始字节并自动归还连接。"""
+        if self._buffer is None:
+            try:
+                self._buffer = self._raw.read() or b""
+                self._consumed_eof = True
+            except Exception:
+                self._healthy = False
+                self._buffer = b""
+                raise
+            finally:
+                self.close()
+        return self._buffer
 
     @property
     def text(self) -> str:
@@ -213,18 +253,27 @@ class HttpClient:
         path: str,
         *,
         json_body: Any = None,
+        raw_body: bytes | None = None,
         headers: Mapping[str, str] | None = None,
         stream: bool = False,
+        timeout: float | None = None,
     ) -> Response | StreamResponse:
+        if json_body is not None and raw_body is not None:
+            raise ValueError("json_body 与 raw_body 不能同时传入")
         merged = dict(self._headers)
         if headers:
             merged.update({k: v for k, v in headers.items() if v is not None})
         body: bytes | None = None
-        if json_body is not None:
+        if raw_body is not None:
+            # 原样字节透传（支持 multipart/form-data、生图 JSON、二进制上传等），
+            # 绝不覆盖或强加 Content-Type。
+            body = bytes(raw_body)
+        elif json_body is not None:
             body = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
-            merged.setdefault("Content-Type", "application/json")
+            if not any(k.lower() == "content-type" for k in merged):
+                merged["Content-Type"] = "application/json"
 
-        request = Request(method.upper(), path, merged, body)
+        request = Request(method.upper(), path, merged, body, timeout=timeout)
 
         if self._handler is not None:
             result = self._handler(request)
@@ -276,19 +325,25 @@ class HttpClient:
         self._sem.acquire()
         handed_off = False
         conn: http.client.HTTPConnection | None = None
+        read_timeout = request.timeout if request.timeout is not None else self._timeout
         try:
             conn, reused = self._checkout()
             try:
+                if conn.sock is not None:
+                    conn.sock.settimeout(read_timeout)
                 conn.request(request.method, self._url(request.path), body=request.body, headers=request.headers)
                 raw = conn.getresponse()
             except (http.client.HTTPException, OSError) as exc:
-                # 连接池里的连接可能已被对端关闭，换一条新连接重试一次
+                # 连接池里的连接可能已被对端关闭，换一条新连接重试一次；
+                # 但读超时（TimeoutError）说明请求已发出，不能静默重发。
                 with contextlib.suppress(Exception):
                     conn.close()
                 conn = None
-                if not reused:
+                if not reused or isinstance(exc, TimeoutError):
                     raise NetworkError(f"{type(exc).__name__}: {exc}") from exc
                 conn = self._new_connection()
+                if conn.sock is not None:
+                    conn.sock.settimeout(read_timeout)
                 conn.request(request.method, self._url(request.path), body=request.body, headers=request.headers)
                 raw = conn.getresponse()
 

@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from .config import (
     BACKOFF_MODES,
+    DEFAULT_IMAGE_TIMEOUT,
     AccountConfig,
     Config,
     ModelFilterConfig,
@@ -43,6 +44,7 @@ from .errors import (
 from .keypool import ApiKey, KeyPool, mask_key
 from .limiter import AdaptiveRateLimiter, RateLimiter
 from .model_policy import apply_chat_model_policy, patch_model_metadata
+import http.client
 from .transport import HttpClient, NetworkError, Response, StreamResponse
 
 # 值得换个 Key 重试的状态码
@@ -82,6 +84,49 @@ MODEL_UNAVAILABLE_HINTS = (
 
 _RETRY_AFTER_BODY = re.compile(r'"retry_?after"?\s*[:=]\s*"?(\d+(?:\.\d+)?)', re.I)
 _RETRY_AFTER_CN = re.compile(r"(\d+(?:\.\d+)?)\s*(?:秒|s)\s*(?:后|之后)", re.I)
+
+
+def is_image_path(path: str) -> bool:
+    """判断上游相对路径是否属于图像接口（images / images/*）。"""
+    clean = (path or "").split("?", 1)[0].strip("/")
+    return clean == "images" or clean.startswith("images/")
+
+
+class PassthroughStream:
+    """透传流式响应包装：在流读取完成或关闭时释放 Key 池并发占位与底层连接。"""
+
+    def __init__(
+        self,
+        response: Response | StreamResponse,
+        *,
+        on_close: Callable[[], None],
+    ) -> None:
+        self.status = response.status
+        self.headers = response.headers
+        self._response = response
+        self._on_close = on_close
+        self._closed = False
+
+    def iter_chunks(self, chunk_size: int = 8192) -> Iterator[bytes]:
+        try:
+            yield from self._response.iter_chunks(chunk_size)
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._response.close()
+        finally:
+            self._on_close()
+
+    def __enter__(self) -> "PassthroughStream":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
 # ------------------------------------------------------------ 智能一换一
 # 模块级状态（进程内共享）：触发节流 + 全局并发护栏
@@ -523,6 +568,20 @@ class StRotator:
         payload = {"model": model, "input": inputs, **params}
         return self._post_with_rotation("embeddings", payload, attempts=attempts)
 
+    def effective_timeout(self, path: str, timeout: float | None = None) -> float:
+        """计算某条上游路径的实际单次请求读超时（秒）。
+
+        图像接口（``images`` / ``images/*``）默认至少使用 180 秒（可由 ``image_timeout`` 覆盖），
+        避免高分辨率生图 / 图生图被对话默认的 60 秒超时误杀。
+        """
+        if timeout is not None:
+            return float(timeout)
+        if is_image_path(path):
+            if self.config.image_timeout is not None:
+                return float(self.config.image_timeout)
+            return max(float(self.config.timeout), DEFAULT_IMAGE_TIMEOUT)
+        return float(self.config.timeout)
+
     def request(
         self,
         path: str,
@@ -532,9 +591,35 @@ class StRotator:
         attempts: int | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        """通用轮换请求，方便接未封装的端点。"""
+        """通用轮换请求（返回解析后的 JSON），方便接未封装的端点。"""
         return self._post_with_rotation(
             path, dict(json_body) if json_body is not None else None, attempts=attempts, method=method, headers=headers
+        )
+
+    def request_raw(
+        self,
+        path: str,
+        *,
+        method: str = "POST",
+        raw_body: bytes | None = None,
+        json_body: Mapping[str, Any] | None = None,
+        attempts: int | None = None,
+        headers: Mapping[str, str] | None = None,
+        auth_scheme: str = "bearer",
+        timeout: float | None = None,
+        allow_stream: bool = True,
+    ) -> Response | PassthroughStream:
+        """原样字节透传轮换请求：兼容生图 JSON、multipart/form-data、二进制与 SSE 响应。"""
+        return self._request_raw_with_rotation(
+            path,
+            method=method,
+            raw_body=raw_body,
+            json_body=dict(json_body) if json_body is not None else None,
+            attempts=attempts,
+            headers=headers,
+            auth_scheme=auth_scheme,
+            timeout=timeout,
+            allow_stream=allow_stream,
         )
 
     def models(self) -> dict[str, Any]:
@@ -1195,7 +1280,10 @@ class StRotator:
         last_body = ""
         last_exc: Exception | None = None
         started_at = self._clock()
+        req_timeout = self.effective_timeout(path)
         budget = self.config.max_total_wait or None
+        if budget is not None and req_timeout > budget:
+            budget = req_timeout
 
         for attempt in range(1, max_attempts + 1):
             remaining = self._remaining(started_at, budget)
@@ -1235,7 +1323,7 @@ class StRotator:
                 req_headers = dict(headers) if headers else {}
                 req_headers.update(self._auth(key, scheme=auth_scheme))
                 response = self._client.request(
-                    method, path, json_body=payload, headers=req_headers
+                    method, path, json_body=payload, headers=req_headers, timeout=req_timeout
                 )
                 body = safe_text(response) if response.status >= 400 else ""
                 action, retry_after = classify(response, body)
@@ -1297,6 +1385,159 @@ class StRotator:
                 retryable = True
             finally:
                 self.pool.release(key)
+
+            if retryable and attempt < max_attempts:
+                self._sleep_between(attempt, started_at, budget)
+
+        raise self._exhausted(max_attempts, last_status, last_body, last_exc)
+
+    def _request_raw_with_rotation(
+        self,
+        path: str,
+        *,
+        method: str = "POST",
+        raw_body: bytes | None = None,
+        json_body: dict[str, Any] | None = None,
+        attempts: int | None = None,
+        headers: Mapping[str, str] | None = None,
+        auth_scheme: str = "bearer",
+        timeout: float | None = None,
+        allow_stream: bool = True,
+    ) -> Response | PassthroughStream:
+        """通用原样透传轮换实现：不改写原始请求体字节，兼容二进制 / multipart / SSE。"""
+        max_attempts = attempts or self.config.max_attempts
+        excluded: set[str] = set()
+        last_status: int | None = None
+        last_body = ""
+        last_exc: Exception | None = None
+        started_at = self._clock()
+        req_timeout = self.effective_timeout(path, timeout)
+        budget = self.config.max_total_wait or None
+        if budget is not None and req_timeout > budget:
+            budget = req_timeout
+        upper_method = method.upper()
+        use_stream = allow_stream and upper_method != "HEAD"
+
+        for attempt in range(1, max_attempts + 1):
+            remaining = self._remaining(started_at, budget)
+            if remaining is not None and remaining <= 0:
+                last_exc = last_exc or TimeoutError(f"超出单请求等待预算 {budget:g}s")
+                self._log(f"[放弃] 超出等待预算 {budget:g}s")
+                break
+
+            try:
+                self.limiter.acquire(timeout=remaining)
+            except TimeoutError as exc:
+                last_exc = exc
+                self._log(f"[放弃] 限速等待超时: {exc}")
+                break
+
+            remaining = self._remaining(started_at, budget)
+            try:
+                key = self.pool.acquire(
+                    exclude=excluded,
+                    timeout=self._acquire_timeout(remaining),
+                    fail_fast=self.config.acquire_fail_fast,
+                )
+            except AllKeysInvalid:
+                self.limiter.refund()
+                raise
+            except NoAvailableKey as exc:
+                self.limiter.refund()
+                last_exc = exc
+                self._log(f"[放弃] 等待可用 Key 超时: {exc}")
+                break
+
+            retryable = False
+            handed_off = False
+            try:
+                started = self._clock()
+                self._note_upstream_attempt()
+                req_headers = {
+                    k: v
+                    for k, v in (headers or {}).items()
+                    if k.lower() not in ("authorization", "x-api-key")
+                }
+                req_headers.update(self._auth(key, scheme=auth_scheme))
+                response = self._client.request(
+                    upper_method,
+                    path,
+                    json_body=json_body,
+                    raw_body=raw_body,
+                    headers=req_headers,
+                    stream=use_stream,
+                    timeout=req_timeout,
+                )
+                body = safe_text(response) if response.status >= 400 else ""
+                action, retry_after = classify(response, body)
+
+                if action == "ok":
+                    content_type = response.headers.get("content-type", "")
+                    if upper_method == "HEAD" or response.status == 204:
+                        response.close()
+                        self.pool.report_success(key, latency=self._clock() - started)
+                        self.limiter.on_success()
+                        return Response(response.status, response.headers, b"")
+
+                    if allow_stream and "text/event-stream" in content_type.lower():
+                        self.pool.report_success(key, latency=self._clock() - started)
+                        self.limiter.on_success()
+                        handed_off = True
+                        return PassthroughStream(response, on_close=lambda k=key: self.pool.release(k))
+
+                    try:
+                        payload = response.read_all()
+                    except (http.client.HTTPException, OSError) as exc:
+                        raise NetworkError(f"{type(exc).__name__}: {exc}") from exc
+                    self.pool.report_success(key, latency=self._clock() - started)
+                    self.limiter.on_success()
+                    return Response(response.status, response.headers, payload)
+
+                last_status, last_body = response.status, body
+                if action == "invalid":
+                    self.pool.report_invalid(key, extract_error(body))
+                    excluded.add(key.key)
+                    self._log(f"[失效] {key.masked}({key.account}) 凭据无效，已排除: {extract_error(body)}")
+                    retryable = True
+                elif action == "model":
+                    err_detail = extract_error(body)
+                    delay = self.pool.report_model_unavailable(key, err_detail)
+                    self._maybe_flash_lite_exchange(key, err_detail)
+                    excluded.add(key.key)
+                    self._log(f"[模型] {key.masked}({key.account}) 套餐不含该模型，冷却 {delay:.0f}s 换下一把: {err_detail}")
+                    if all(k.key in excluded for k in self.pool.keys):
+                        raise ApiError(response.status, body)
+                    if not self.pool.any_usable():
+                        wait = self.pool.soonest_wait()
+                        last_exc = NoAvailableKey(
+                            f"所有 Key 的套餐额度都不可用（最快 {wait:.0f}s 后复探）",
+                            retry_after=wait or None,
+                        )
+                        break
+                    retryable = True
+                elif action == "retry":
+                    if response.status == 429:
+                        delay = self.pool.report_rate_limit(key, retry_after)
+                        self.limiter.on_rate_limited()
+                        self._log(
+                            f"[限流] {key.masked}({key.account}) 429，冷却 {delay:.1f}s "
+                            f"(第 {key.consecutive_failures} 次)"
+                        )
+                    else:
+                        delay = self.pool.report_server_error(key, f"HTTP {response.status}")
+                        self._log(f"[异常] {key.masked}({key.account}) {response.status}，冷却 {delay:.1f}s")
+                    retryable = True
+                else:
+                    self.pool.report_client_error(key, extract_error(body))
+                    raise ApiError(response.status, body)
+            except NetworkError as exc:
+                delay = self.pool.report_server_error(key, f"{type(exc).__name__}")
+                last_exc = exc
+                self._log(f"[网络] {key.masked}({key.account}) {exc}，冷却 {delay:.1f}s")
+                retryable = True
+            finally:
+                if not handed_off:
+                    self.pool.release(key)
 
             if retryable and attempt < max_attempts:
                 self._sleep_between(attempt, started_at, budget)

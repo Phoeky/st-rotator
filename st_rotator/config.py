@@ -22,6 +22,10 @@ STRATEGIES = ("round_robin", "least_inflight", "least_recent", "weighted")
 # 重试退避模式：指数（1s→2s→4s→8s）或固定（每次都等同样久）
 BACKOFF_MODES = ("exponential", "fixed")
 
+# 图像接口（/v1/images/*）默认单次上游读超时（秒）：生图/图生图是非流式长耗时请求，
+# 默认至少 180 秒，避免高分辨率出图被对话默认的 60 秒超时误杀并触发重复重试。
+DEFAULT_IMAGE_TIMEOUT = 180.0
+
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
@@ -349,6 +353,8 @@ class Config:
     # 重试与超时
     max_attempts: int = 5
     timeout: float = 60.0
+    # 图像接口（/v1/images/*）单次上游读超时（秒）；None 表示自动取 max(timeout, 180s)
+    image_timeout: float | None = None
     connect_timeout: float = 10.0
     acquire_timeout: float = 120.0
     # 取 Key 的快速失败阈值：最快可用时刻若超过此秒数，立即返回 429 而不是干等。
@@ -394,6 +400,8 @@ class Config:
             raise ConfigError("max_attempts 必须 >= 1")
         if self.timeout <= 0 or self.connect_timeout <= 0:
             raise ConfigError("timeout / connect_timeout 必须 > 0")
+        if self.image_timeout is not None and self.image_timeout <= 0:
+            raise ConfigError("image_timeout 必须 > 0 或留空")
         if self.max_total_wait < 0:
             raise ConfigError("max_total_wait 不能为负")
         if self.acquire_fail_fast < 0:
@@ -463,6 +471,8 @@ class Config:
             "default_model": self.default_model,
             "strategy": self.strategy,
             "max_attempts": self.max_attempts,
+            "timeout": self.timeout,
+            "image_timeout": self.image_timeout,
             "max_total_wait": self.max_total_wait,
             "backoff_mode": self.backoff_mode,
             "retry_backoff": self.retry_backoff,

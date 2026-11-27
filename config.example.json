@@ -5,6 +5,7 @@
   "strategy": "round_robin",
   "max_attempts": 8,
   "timeout": 60,
+  "image_timeout": 180,
   "connect_timeout": 10,
   "acquire_timeout": 120,
   "max_total_wait": 120,

@@ -27,16 +27,19 @@ WorkBuddy / 各类 Agent 框架只认「OpenAI 兼容端点 + API Key」，没�
 
 from __future__ import annotations
 
+import copy
 import hmac
 import json
+import posixpath
+import re
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any, Callable, Mapping
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 
-from .client import StRotator, note_serve_begin, note_serve_end
+from .client import PassthroughStream, StRotator, is_image_path, note_serve_begin, note_serve_end
 from .errors import AllKeysInvalid, ApiError, NoAvailableKey, RotationExhausted, RotatorError
 from .keypool import user_context
 from .model_policy import apply_chat_model_policy
@@ -59,7 +62,100 @@ ANTHROPIC_PREFIX = "/anthropic"
 ANTHROPIC_MESSAGES_PATH = "/anthropic/v1/messages"
 ANTHROPIC_MODELS_PATH = "/anthropic/v1/models"
 
-MAX_BODY_BYTES = 32 * 1024 * 1024
+# 通用 /v1/* 透传允许的 HTTP 方法
+ALLOWED_PASSTHROUGH_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"})
+
+# 请求体上限（64 MiB，兼容图生图携带多张高分辨率参考图）
+MAX_BODY_BYTES = 64 * 1024 * 1024
+
+_BAD_PATH_CHARS = re.compile(r"[\x00-\x1f\x7f\\]")
+_BAD_PERCENT_ENC = re.compile(r"%(?![0-9a-fA-F]{2})")
+_BOUNDARY_RE = re.compile(r'boundary=(?:"([^"]+)"|([^;\s]+))', re.IGNORECASE)
+_DISP_NAME_MODEL_RE = re.compile(rb'content-disposition\s*:[^\r\n]*\bname="model"', re.IGNORECASE)
+
+
+def resolve_upstream_passthrough_path(
+    base_url: str,
+    pathname: str,
+    search: str = "",
+) -> tuple[str, str] | None:
+    """将本地 /v1/... 路径安全映射为上游相对路径，防御路径遍历与跨主机逃逸。
+
+    返回 (upstream_relative_path_with_query, normalized_subpath)，例如：
+        ("/v1/images/generations/", "?detail=1") -> ("images/generations?detail=1", "/images/generations")
+    不合法（非 /v1/*、空子路径、..、%2e%2e、//、控制字符或越出 base_url）返回 None。
+    """
+    if not pathname.startswith("/v1/"):
+        return None
+    raw_subpath = pathname[3:]  # 保留前导 "/"
+    subpath = raw_subpath.rstrip("/")
+    if len(subpath) <= 1:
+        return None
+    if _BAD_PATH_CHARS.search(subpath):
+        return None
+    if "//" in subpath:
+        return None
+
+    for segment in subpath[1:].split("/"):
+        if not segment or segment in (".", ".."):
+            return None
+        if _BAD_PERCENT_ENC.search(segment):
+            return None
+        decoded = unquote(segment)
+        if decoded in (".", "..") or "/" in decoded or "\\" in decoded or "\x00" in decoded:
+            return None
+
+    base_trimmed = (base_url or "").rstrip("/")
+    candidate = f"{base_trimmed}{subpath}{search}"
+    try:
+        base_parsed = urlsplit(base_trimmed)
+        target_parsed = urlsplit(candidate)
+    except ValueError:
+        return None
+    if not base_parsed.scheme or not base_parsed.netloc:
+        return None
+    if (target_parsed.scheme, target_parsed.netloc) != (base_parsed.scheme, base_parsed.netloc):
+        return None
+    base_path = base_parsed.path.rstrip("/")
+    norm_target_path = posixpath.normpath(target_parsed.path)
+    if base_path and norm_target_path != base_path and not norm_target_path.startswith(f"{base_path}/"):
+        return None
+
+    return f"{subpath[1:]}{search}", subpath
+
+
+def _extract_model_from_passthrough(raw: bytes, content_type: str) -> str | None:
+    """只读提取透传请求体中的 model 字段（兼容 JSON 与 multipart/form-data），绝不修改原始字节。"""
+    if not raw:
+        return None
+    ct = (content_type or "").lower()
+    if "json" in ct or (not ct and raw.lstrip().startswith(b"{")):
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if isinstance(parsed, dict) and parsed.get("model") is not None:
+            return str(parsed["model"])
+        return None
+    if "multipart/form-data" in ct:
+        m = _BOUNDARY_RE.search(content_type or "")
+        if not m:
+            return None
+        boundary = (m.group(1) or m.group(2) or "").encode("latin-1", "ignore")
+        if not boundary:
+            return None
+        delimiter = b"--" + boundary
+        for part in raw.split(delimiter)[1:]:
+            if part.startswith(b"--"):
+                break
+            sep = b"\r\n\r\n" if b"\r\n\r\n" in part else (b"\n\n" if b"\n\n" in part else None)
+            if sep is None:
+                continue
+            head, body = part.split(sep, 1)
+            if _DISP_NAME_MODEL_RE.search(head):
+                val = body.rstrip(b"\r\n").decode("utf-8", "ignore").strip()
+                return val or None
+    return None
 
 
 def error_payload(message: str, err_type: str = "upstream_error", code: str | None = None) -> dict:
@@ -451,7 +547,54 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
-    def _forwardable_headers(self) -> dict[str, str]:
+    def _send_passthrough_response(
+        self,
+        status: int,
+        content: bytes,
+        content_type: str | None = None,
+        *,
+        head_only: bool = False,
+        upstream_content_length: str | None = None,
+    ) -> None:
+        try:
+            self.send_response(status)
+            if content_type:
+                self.send_header("Content-Type", content_type)
+            if status != 204:
+                if head_only and upstream_content_length is not None:
+                    self.send_header("Content-Length", upstream_content_length)
+                else:
+                    self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            if not head_only and status != 204 and content:
+                self.wfile.write(content)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def _send_passthrough_stream(self, stream: PassthroughStream) -> bool:
+        """流式透传上游 text/event-stream 响应原始字节，返回是否正常读完。"""
+        ok = True
+        try:
+            self.send_response(stream.status)
+            self.send_header("Content-Type", stream.headers.get("content-type") or "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for chunk in stream.iter_chunks():
+                if chunk:
+                    self._write_chunk(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            ok = False
+        finally:
+            stream.close()
+            try:
+                self._end_stream()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+        return ok
+
+    def _forwardable_headers(self, *, passthrough: bool = False) -> dict[str, str]:
         """提取需要透传给上游的请求头（追踪 ID、租户、组织、自定义 x- 头等）。
 
         **绝不能透传调用方的凭据头**（``x-api-key`` / ``authorization``）：
@@ -473,6 +616,13 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             "openai-project",
             "openai-beta",
         }
+        if passthrough:
+            allowed_specific.update({
+                "content-type",
+                "accept",
+                "anthropic-version",
+                "anthropic-beta",
+            })
         # 凭据类头一律不透传（大小写不敏感）
         credential_headers = {
             "x-api-key",
@@ -581,9 +731,17 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------ 路由
 
+    def _split_target(self) -> tuple[str, str, str]:
+        """拆分原始请求目标，返回 (raw_pathname, normalized_path, search)。"""
+        raw_url = self.path or "/"
+        qidx = raw_url.find("?")
+        raw_pathname = raw_url[:qidx] if qidx >= 0 else raw_url
+        search = raw_url[qidx:] if qidx >= 0 else ""
+        normalized = raw_pathname.rstrip("/") or "/"
+        return raw_pathname, normalized, search
+
     def do_GET(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
+        raw_pathname, path, search = self._split_target()
         if path in HEALTH_PATHS:
             summary = self.rotator.pool.summary()
             self._send_json(200, {"status": "ok", "paused": self._paused, **summary})
@@ -600,7 +758,7 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             if path.startswith(ui.API_PREFIX) and role not in ("admin", "open"):
                 self._send_json(401, error_payload("invalid console token", "authentication_error"))
                 return
-            self._dispatch_console("GET", path, query=parse_qs(parsed.query))
+            self._dispatch_console("GET", path, query=parse_qs(search[1:] if search else ""))
             return
         if role not in ("admin", "open", "sub"):
             self._send_json(401, error_payload("invalid proxy token", "authentication_error"))
@@ -611,11 +769,17 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             if path == ANTHROPIC_MODELS_PATH:
                 self._handle_anthropic_models()
                 return
-            self._dispatch_proxy("GET", path, query_suffix=f"?{parsed.query}" if parsed.query else "")
+            self._dispatch_proxy("GET", raw_pathname, search=search)
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        raw_pathname, path, search = self._split_target()
+        if path in HEALTH_PATHS:
+            self._send_passthrough_response(200, b"", "application/json; charset=utf-8", head_only=True)
+            return
+        self._handle_passthrough_method("HEAD", raw_pathname, search, has_body=False)
 
     def do_POST(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
+        raw_pathname, path, search = self._split_target()
         role, sub = self._authenticate()
         is_console = self.console is not None and path.startswith(ui.API_PREFIX)
         if is_console:
@@ -643,7 +807,6 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
             self._dispatch_console("POST", path, body=body if isinstance(body, dict) else {})
             return
 
-        query_suffix = f"?{parsed.query}" if parsed.query else ""
         with user_context(self._user_label(role, sub)):
             if path == ANTHROPIC_MESSAGES_PATH:
                 self._handle_anthropic_messages(raw)
@@ -656,33 +819,60 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
-            self._dispatch_proxy("POST", path, raw=raw, query_suffix=query_suffix)
+            self._dispatch_proxy("POST", raw_pathname, raw=raw, search=search)
 
-    def _dispatch_proxy(self, method: str, path: str, *, raw: bytes = b"", query_suffix: str = "") -> None:
-        """处理对外代理路径（/v1/* 与 /v1/models），调用方已鉴权完毕。
+    def do_PUT(self) -> None:  # noqa: N802
+        raw_pathname, _path, search = self._split_target()
+        self._handle_passthrough_method("PUT", raw_pathname, search, has_body=True)
 
-        单独拆出来是为了把 :func:`user_context` 的作用域收在一处：它必须在
+    def do_PATCH(self) -> None:  # noqa: N802
+        raw_pathname, _path, search = self._split_target()
+        self._handle_passthrough_method("PATCH", raw_pathname, search, has_body=True)
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        raw_pathname, _path, search = self._split_target()
+        self._handle_passthrough_method("DELETE", raw_pathname, search, has_body=True)
+
+    def _handle_passthrough_method(self, method: str, raw_pathname: str, search: str, *, has_body: bool) -> None:
+        role, sub = self._authenticate()
+        if role not in ("admin", "open", "sub"):
+            self._send_json(401, error_payload("invalid proxy token", "authentication_error"))
+            return
+        self._auth_role = role
+        self._auth_subkey = sub
+        raw = b""
+        if has_body:
+            try:
+                raw = self._read_body()
+            except ValueError as exc:
+                self._send_json(413, error_payload(str(exc), "invalid_request_error"))
+                return
+        with user_context(self._user_label(role, sub)):
+            self._dispatch_proxy(method, raw_pathname, raw=raw, search=search)
+
+    def _dispatch_proxy(self, method: str, raw_pathname: str, *, raw: bytes = b"", search: str = "") -> None:
+        """处理对外代理路径（/v1/*），调用方已鉴权完毕。
+
+        单独拆出来是为了把 user_context 的作用域收在一处：它必须在
         KeyPool 的 acquire / release 全程有效（流式响应也在同一线程内迭代完），
         所以"标注调用方"和"真正转发"之间不能隔着一层提前 return 的分支。
         """
         if self._paused:
             self._send_json(503, error_payload("gateway paused from console", "service_unavailable", "503"))
             return
-        if method == "GET":
-            if path == MODELS_PATH:
-                self._forward_simple("GET", f"models{query_suffix}")
+        if method == "GET" and raw_pathname in (MODELS_PATH, MODELS_PATH + "/"):
+            self._forward_models(search)
+            return
+        if method == "POST" and raw_pathname in (CHAT_PATH, CHAT_PATH + "/"):
+            self._handle_chat(raw)
+            return
+        if method in ALLOWED_PASSTHROUGH_METHODS and raw_pathname.startswith("/v1/"):
+            resolved = resolve_upstream_passthrough_path(self.rotator.config.base_url, raw_pathname, search)
+            if resolved is not None:
+                upstream_path, clean_subpath = resolved
+                self._forward_simple(method, upstream_path, raw, clean_subpath=clean_subpath)
                 return
-            if path.startswith("/v1/"):
-                self._forward_simple("GET", f"{path[4:]}{query_suffix}")
-                return
-        else:
-            if path == CHAT_PATH:
-                self._handle_chat(raw)
-                return
-            if path.startswith("/v1/"):
-                self._forward_simple("POST", f"{path[4:]}{query_suffix}", raw)
-                return
-        self._send_json(404, error_payload(f"unknown path {path}", "invalid_request_error"))
+        self._send_json(404, error_payload(f"unknown path {raw_pathname}", "invalid_request_error"))
 
     def _user_label(self, role: str | None, sub: SubKey | None) -> str:
         """当前请求在 Key 池里显示成"谁"。
@@ -1100,70 +1290,151 @@ class RotatorProxyHandler(BaseHTTPRequestHandler):
                 text_len=text_len, latency_ms=_elapsed_ms(started),
             )
 
-    def _forward_simple(self, method: str, upstream_path: str, raw: bytes = b"") -> None:
-        """其余端点（embeddings / images / models…）原样透传，同样享受轮换。"""
+    def _forward_models(self, search: str = "") -> None:
+        """处理 GET /v1/models：走 Key 池轮换并按可用模型白名单与元数据补丁过滤。"""
+        if self._paused:
+            self._send_json(503, error_payload("gateway paused from console", "service_unavailable", "503"))
+            return
+        headers = self._forwardable_headers()
+        try:
+            result = self.rotator.request(f"models{search}", method="GET", headers=headers)
+        except ApiError as exc:
+            self._send_json(exc.status, _passthrough_error(exc.status, exc.body))
+            return
+        except RotationExhausted as exc:
+            status = exc.last_status if (exc.last_status or 0) >= 400 else 502
+            retry_after = self.rotator.pool.soonest_wait() or None if status == 429 else None
+            self._send_json(status, error_payload(str(exc), "upstream_exhausted", str(status)), retry_after=retry_after)
+            return
+        except NoAvailableKey as exc:
+            self._send_json(429, error_payload(str(exc), "rate_limit_exceeded", "429"), retry_after=exc.retry_after)
+            return
+        except AllKeysInvalid as exc:
+            self._send_json(503, error_payload(str(exc), "all_keys_invalid", "503"))
+            return
+        except RotatorError as exc:
+            self._send_json(502, error_payload(str(exc), "upstream_error", "502"))
+            return
+        result = self.rotator.filter_models_payload(result)
+        self._send_json(200, result)
+
+    def _forward_simple(
+        self,
+        method: str,
+        upstream_path: str,
+        raw: bytes = b"",
+        *,
+        clean_subpath: str | None = None,
+    ) -> None:
+        """其余 /v1/* 端点（images / embeddings / responses / files…）原样透传并复用轮换池。
+
+        设计要点：
+        - 图像路由（/v1/images/*）与非 JSON 请求（如 multipart/form-data 图生图上传）
+          直接透传原始字节与 Content-Type，不经对话请求体清洗；
+        - 其他 JSON 透传端点仅在存在可清洗的对话字段且发生改动时才重写 JSON，否则原样转发；
+        - 支持原样返回二进制响应、非 200 状态码、HEAD/204 空响应与 text/event-stream 流式响应。
+        """
         if self._paused:
             self._send_json(503, error_payload("gateway paused from console", "service_unavailable", "503"))
             return
         started = time.monotonic()
-        # 用量统计只对写请求（POST 透传）记账；GET /v1/models 之类的查询不消耗上游额度。
-        record_usage = method == "POST"
-        body = None
-        if raw:
-            try:
-                body = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                self._send_json(400, error_payload(f"invalid JSON body: {exc}", "invalid_request_error"))
-                return
-        headers = self._forwardable_headers()
-        # 透传端点（/v1/responses、/v1/embeddings…）也做同一套清洗：
-        # 商汤对 messages 的严格校验与端点无关，漏掉这里会让 Agent 换个入口再撞 400。
-        if isinstance(body, dict):
-            # 保留既有通用清洗，但不把 Chat 专属模型策略套到其他 API。
-            sanitize_chat_payload(body, model_policy=False)
-        # 路由层真实拦截：透传端点只要显式点名了模型，就按可用白名单拦一遍，
-        # 名单外的模型直接 400，不消耗上游额度（见 model_filter.available 配置）。
-        if record_usage and isinstance(body, dict) and body.get("model") is not None:
-            reason = self.rotator.model_block_reason(str(body.get("model")))
+        upper_method = method.upper()
+        has_body = upper_method not in ("GET", "HEAD")
+        # 用量统计只对写请求记账；GET / HEAD 查询不消耗上游额度。
+        record_usage = upper_method in ("POST", "PUT", "PATCH")
+        content_type = self.headers.get("Content-Type") or ""
+        is_image_route = is_image_path(clean_subpath or upstream_path)
+
+        # 提取模型名（只读，不修改 raw），用于白名单拦截与用量归属。
+        req_model = _extract_model_from_passthrough(raw, content_type) if (has_body and raw) else None
+        if record_usage and req_model is not None:
+            reason = self.rotator.model_block_reason(req_model)
             if reason is not None:
                 self._send_json(400, error_payload(reason, "invalid_request_error", "model_not_available"))
-                self._record_subkey_usage(ok=False, model=str(body.get("model")))
+                self._record_subkey_usage(ok=False, model=req_model)
                 return
+
+        send_body: bytes | None = None
+        if has_body and raw:
+            send_body = raw
+            # 仅对非图像 JSON 端点保留既有商汤 messages 400 清洗，且未发生改动时保持原始字节不动。
+            ct_lower = content_type.lower()
+            is_json_ct = "json" in ct_lower or (not ct_lower and raw.lstrip().startswith(b"{"))
+            if not is_image_route and is_json_ct:
+                try:
+                    parsed_body = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    parsed_body = None
+                if isinstance(parsed_body, dict):
+                    cleaned = copy.deepcopy(parsed_body)
+                    sanitize_chat_payload(cleaned, model_policy=False)
+                    if cleaned != parsed_body:
+                        send_body = json.dumps(cleaned, ensure_ascii=False).encode("utf-8")
+
+        if record_usage and self.console is not None:
+            self.console.metrics.note_request(stream=False)
+
+        headers = self._forwardable_headers(passthrough=True)
         try:
-            result = self.rotator.request(upstream_path, method=method, json_body=body, headers=headers)
+            upstream = self.rotator.request_raw(
+                upstream_path,
+                method=upper_method,
+                raw_body=send_body,
+                headers=headers,
+            )
         except ApiError as exc:
             self._send_json(exc.status, _passthrough_error(exc.status, exc.body))
             if record_usage:
-                self._record_subkey_usage(ok=False, latency_ms=_elapsed_ms(started))
+                self._record_subkey_usage(ok=False, model=req_model, latency_ms=_elapsed_ms(started))
             return
         except RotationExhausted as exc:
             status = exc.last_status if (exc.last_status or 0) >= 400 else 502
-            self._send_json(status, error_payload(str(exc), "upstream_exhausted", str(status)))
+            retry_after = self.rotator.pool.soonest_wait() or None if status == 429 else None
+            self._send_json(status, error_payload(str(exc), "upstream_exhausted", str(status)), retry_after=retry_after)
             if record_usage:
-                self._record_subkey_usage(ok=False, latency_ms=_elapsed_ms(started))
+                self._record_subkey_usage(ok=False, model=req_model, latency_ms=_elapsed_ms(started))
             return
         except NoAvailableKey as exc:
             self._send_json(429, error_payload(str(exc), "rate_limit_exceeded", "429"), retry_after=exc.retry_after)
             if record_usage:
-                self._record_subkey_usage(ok=False, latency_ms=_elapsed_ms(started))
+                self._record_subkey_usage(ok=False, model=req_model, latency_ms=_elapsed_ms(started))
             return
         except AllKeysInvalid as exc:
             self._send_json(503, error_payload(str(exc), "all_keys_invalid", "503"))
             if record_usage:
-                self._record_subkey_usage(ok=False, latency_ms=_elapsed_ms(started))
+                self._record_subkey_usage(ok=False, model=req_model, latency_ms=_elapsed_ms(started))
             return
         except RotatorError as exc:
             self._send_json(502, error_payload(str(exc), "upstream_error", "502"))
             if record_usage:
-                self._record_subkey_usage(ok=False, latency_ms=_elapsed_ms(started))
+                self._record_subkey_usage(ok=False, model=req_model, latency_ms=_elapsed_ms(started))
             return
-        # 模型清单按可用白名单过滤：上层应用看到的清单与控制台保持一致，
-        # 名单外的模型不列出（路由层点名它们还会被 400 拦下，见 model_filter.available）。
-        if method == "GET" and upstream_path.split("?", 1)[0].rstrip("/") == "models":
-            result = self.rotator.filter_models_payload(result)
+
+        if isinstance(upstream, PassthroughStream):
+            stream_ok = self._send_passthrough_stream(upstream)
+            if record_usage:
+                self._record_subkey_usage(
+                    ok=stream_ok, model=req_model, stream=True, latency_ms=_elapsed_ms(started)
+                )
+            return
+
+        resp_ct = upstream.headers.get("content-type")
         if record_usage:
-            self._record_subkey_usage(ok=True, usage=_extract_usage(result), latency_ms=_elapsed_ms(started))
-        self._send_json(200, result)
+            usage = None
+            if upstream.content and resp_ct and "json" in resp_ct.lower():
+                try:
+                    usage = _extract_usage(json.loads(upstream.content))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    usage = None
+            self._record_subkey_usage(ok=True, model=req_model, usage=usage, latency_ms=_elapsed_ms(started))
+
+        self._send_passthrough_response(
+            upstream.status,
+            upstream.content,
+            resp_ct,
+            head_only=(upper_method == "HEAD"),
+            upstream_content_length=upstream.headers.get("content-length"),
+        )
 
 
 def create_server(
